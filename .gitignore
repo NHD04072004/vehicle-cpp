@@ -18,6 +18,7 @@ tests/output/
 *.swp
 .idea/
 .vscode/
+.claude/
 
 # Local debug dumps
 /logs/

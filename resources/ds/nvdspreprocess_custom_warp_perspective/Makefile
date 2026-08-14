@@ -5,11 +5,9 @@ endif
 
 CXX:= g++
 NVCC:= /usr/local/cuda-$(CUDA_VER)/bin/nvcc
-NVDS_VERSION:=8.0
-
 TARGET_LIB:= libnvdspreprocess_custom_warp_perspective.so
 
-DS_SRC:= /opt/nvidia/deepstream/deepstream-$(NVDS_VERSION)
+DS_SRC:= /opt/nvidia/deepstream/deepstream
 DS_INC:= /opt/nvidia/deepstream/deepstream/sources
 LIB_INSTALL_DIR?= $(DS_SRC)/lib/
 
@@ -28,7 +26,8 @@ NVCCFLAGS:= -Xcompiler -fPIC -std=c++17 -O2 \
 	-I /usr/local/cuda-$(CUDA_VER)/include \
 	-gencode arch=compute_86,code=sm_86 \
 	-gencode arch=compute_75,code=sm_75 \
-	-gencode arch=compute_89,code=sm_89
+	-gencode arch=compute_89,code=sm_89 \
+	-gencode arch=compute_87,code=sm_87
 
 PKGS:= gstreamer-1.0
 

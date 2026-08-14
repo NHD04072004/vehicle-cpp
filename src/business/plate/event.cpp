@@ -12,7 +12,7 @@ bool mapVehicleType(int cls, std::string* out_text) {
     case kClassCar: *out_text = "Ô TÔ"; return true;
     case kClassMotorbike: *out_text = "XE MÁY"; return true;
     case kClassTruck: *out_text = "XE TẢI"; return true;
-    case kClassBus: *out_text = "XE BUÝT"; return true;
+    case kClassBus: *out_text = "XE KHÁCH"; return true;
     default: out_text->clear(); return false;
   }
 }

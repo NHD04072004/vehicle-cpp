@@ -6,6 +6,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      network: host
     image: nhd04072004/vehicle-app:1.0.0
     container_name: vehicle
     restart: unless-stopped
@@ -33,13 +34,8 @@ services:
       - TZ=Asia/Ho_Chi_Minh
       - NVIDIA_VISIBLE_DEVICES=1
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
-      # tcmalloc: glibc malloc phân mảnh nặng với JPEG buffer kích thước thay đổi và
-      # không trả RAM về OS → heap phình dần theo giờ. TCMALLOC_RELEASE_RATE chỉ có
-      # tác dụng khi lib thực sự được nạp qua LD_PRELOAD.
       - LD_PRELOAD=${LD_PRELOAD:-/usr/lib/x86_64-linux-gnu/libtcmalloc.so.4}
       - TCMALLOC_RELEASE_RATE=${TCMALLOC_RELEASE_RATE:-10}
-      # MALLOC_* dưới đây là tuning của glibc malloc — vô hiệu khi tcmalloc được nạp.
-      # Giữ lại để fallback khi tắt LD_PRELOAD (LD_PRELOAD= docker compose up -d).
       - MALLOC_ARENA_MAX=2
       - MALLOC_MMAP_THRESHOLD_=131072
       - MALLOC_TRIM_THRESHOLD_=131072

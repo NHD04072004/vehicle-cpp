@@ -3,6 +3,12 @@ ARG BASE_IMAGE=nhd04072004/ds_app:8.0-amd64
 ## Build stage
 FROM ${BASE_IMAGE} AS build
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libjsoncpp-dev \
+      libcurl4-openssl-dev \
+      libjpeg-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /src
 COPY CMakeLists.txt vehicle.sh main.cpp ./
 COPY src/ ./src/
@@ -13,6 +19,10 @@ RUN bash vehicle.sh build -DBUILD_TESTS=OFF
 
 ## Production stage
 FROM ${BASE_IMAGE}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libmosquitto1 \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY --from=build /src/build/vehicle /app/build/vehicle

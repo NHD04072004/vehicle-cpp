@@ -1,4 +1,3 @@
-// Entry point — nạp config, kết nối Smart VMS, dựng pipeline DeepStream.
 #include <glib-unix.h>
 #include <gst/gst.h>
 
