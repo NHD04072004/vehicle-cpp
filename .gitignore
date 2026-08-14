@@ -1,0 +1,31 @@
+# Build
+/build/
+*.o
+*.so
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Experiment / local dumps
+tests/output/
+*.ppm
+*.engine.log
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Local debug dumps
+/logs/
+report_images/
+tests/data
+docs/BAO_CAO_HIEU_NANG.md
+
+# models
+*.onnx
+*.pt
+*.engine

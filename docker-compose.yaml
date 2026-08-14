@@ -1,0 +1,64 @@
+#################################
+#   docker compose up -d --build
+#################################
+services:
+  vehicle:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nhd04072004/vehicle-app:1.0.0
+    container_name: vehicle
+    restart: unless-stopped
+    runtime: nvidia
+
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+    volumes:
+      - ./resources/config:/app/resources/config
+      - ./resources/ds:/app/resources/ds
+      - ./resources/weights:/app/resources/weights
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
+
+    environment:
+      - TZ=Asia/Ho_Chi_Minh
+      - NVIDIA_VISIBLE_DEVICES=1
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+      # tcmalloc: glibc malloc phân mảnh nặng với JPEG buffer kích thước thay đổi và
+      # không trả RAM về OS → heap phình dần theo giờ. TCMALLOC_RELEASE_RATE chỉ có
+      # tác dụng khi lib thực sự được nạp qua LD_PRELOAD.
+      - LD_PRELOAD=${LD_PRELOAD:-/usr/lib/x86_64-linux-gnu/libtcmalloc.so.4}
+      - TCMALLOC_RELEASE_RATE=${TCMALLOC_RELEASE_RATE:-10}
+      # MALLOC_* dưới đây là tuning của glibc malloc — vô hiệu khi tcmalloc được nạp.
+      # Giữ lại để fallback khi tắt LD_PRELOAD (LD_PRELOAD= docker compose up -d).
+      - MALLOC_ARENA_MAX=2
+      - MALLOC_MMAP_THRESHOLD_=131072
+      - MALLOC_TRIM_THRESHOLD_=131072
+      - VEHICLE_LOG_LEVEL=${VEHICLE_LOG_LEVEL:-info}
+      - VEHICLE_MEM_STATS=${VEHICLE_MEM_STATS:-0}   # 1 = log mem_stats mỗi 5s (cần log level debug)
+      - USE_NEW_NVSTREAMMUX=yes
+      - WARP_DEBUG=${WARP_DEBUG:-0}   # 1 = dump mask/parent/fail reason (tối đa 64 dòng/process)
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+networks:
+  default:
+    name: vehicle_network
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.28.2.0/24
+          gateway: 10.28.2.1

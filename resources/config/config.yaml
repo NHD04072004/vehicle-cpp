@@ -1,0 +1,76 @@
+AI_MODULE: "PLATE"
+
+plate:
+  send_mode: 2   # 1 = chỉ bắn biển tốt (không UNKNOWN/_unk); 2 = bắn full
+  max_recognize_times: 20
+  plate_style:
+    - "NNCNNNNN"
+    - "NNCNNNNNN"
+    - "CCNNNN"
+    - "NNCNNNN"
+    - "NNCCNNNN"
+    - "NNNNNCC"
+    - "NNNNNCN"
+    - "NNNNNCCNN"
+    - "NNCCNNNNN"
+    - "NNCCNNNNNN"
+
+pipeline:
+  # nvurisrcbin — decode / RTSP.
+  rtsp:
+    select_rtp_protocol: 4   # 4 = TCP (RTP over TCP)
+    reconnect_interval: 10   # giây; 0 = không tự reconnect
+    reconnect_attempts: -1   # -1 = vô hạn; 0 = không retry thêm
+    drop_on_latency: true
+    latency: 100
+    low_latency_mode: true
+    num_extra_surfaces: 1
+    drop_frame_interval: 2
+    require_ready: true
+    ready_timeout_ms: 3000
+    watch_interval_ms: 5000  # chu kỳ probe lại (thread riêng)
+
+  streammux:
+    batch_size: 8
+    batched_push_timeout: 40000   # µs
+    sync_inputs: false
+    attach_sys_ts: true
+    max_latency: 0                # ns; dùng khi sync_inputs=true
+    num_surfaces_per_frame: 1
+    config_file: "resources/ds/streammux/config_mux.txt"
+
+  pgie:
+    config: "resources/ds/infer/pgie_vehicle.txt"
+    unique_id: 1
+
+  sgie_plate:
+    config: "resources/ds/infer/sgie1_plate_pose.txt"   # YOLO-Pose keypoints
+    unique_id: 2
+
+  preprocess_plate:
+    config: "resources/ds/infer/config_preprocess_warp_plate.txt"
+    unique_id: 6
+
+  sgie_digit:
+    config: "resources/ds/infer/sgie2_digit.txt"   # input-tensor-meta=1 từ warp
+    unique_id: 3
+
+  tracker:
+    ll_config: "resources/ds/tracker/config_tracker_NvDCF_perf.yml"
+    ll_lib: "/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so"
+    width: 640
+    height: 384
+
+  sink:
+    type: "fake"             # fake (headless) | file (mp4)
+    output_file: "tests/output/test_result.mp4"
+
+  probe:
+    plate_expand_ratio: 0.30      # nới ROI xe trước SGIE1
+    anchor_bottom_ratio: 0.12     # anchor nhích lên từ đáy bbox
+    char_iou_dedup: 0.40          # IoU dedup ký tự
+    square_plate_ratio: 0.50      # y_spread / avg_h > ngưỡng → biển 2 dòng
+    min_plate_width: 20           # bỏ crop biển nhỏ hơn (px)
+    vehicle_bottom_pad: 10        # nới đáy bbox xe cho khỏi cắt biển
+    keypoint_min_confidence: 0.25
+    publish_bbox: true

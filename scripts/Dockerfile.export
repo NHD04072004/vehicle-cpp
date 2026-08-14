@@ -1,0 +1,22 @@
+# Toolchain image để convert weights → ONNX → TensorRT engine.
+#   docker build -f Dockerfile.export -t nhd04072004/vehicle-export:1.0.0 .
+#   docker compose -f docker-compose.export.yaml run --rm vehicle_export
+#
+# Base đã có torch / ultralytics / onnx / trtexec; ở đây bổ sung phần thiếu cho
+# checkpoint yolov5 (pandas, seaborn) và vendor repo ultralytics/yolov5.
+ARG BASE_IMAGE=nhd04072004/ds_app:8.0-amd64
+FROM ${BASE_IMAGE}
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir pandas seaborn
+
+# Repo yolov5 chỉ dùng để nạp checkpoint DetectionModel khi export ONNX.
+ENV YOLOV5_REPO=/opt/yolov5
+RUN git clone --depth 1 https://github.com/ultralytics/yolov5 ${YOLOV5_REPO}
+
+WORKDIR /app
+ENV VEHICLE_ROOT=/app
+ENTRYPOINT ["bash", "/app/scripts/build_engines.sh"]

@@ -1,0 +1,30 @@
+# Convert resources/weights/*.pt → ONNX → TensorRT engine (cần GPU).
+# Chạy từ root repo:
+#   docker compose -f scripts/docker-compose.export.yaml run --rm vehicle_export
+#   FORCE=1 ONLY=digit docker compose -f scripts/docker-compose.export.yaml run --rm -e FORCE -e ONLY vehicle_export
+services:
+  vehicle_export:
+    build:
+      context: .
+      dockerfile: Dockerfile.export
+    image: nhd04072004/vehicle-export:1.0.0
+    runtime: nvidia
+
+    volumes:
+      - ../:/app
+
+    environment:
+      - TZ=Asia/Ho_Chi_Minh
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+      - YOLOV5_REPO=/opt/yolov5
+      - PRECISION=${PRECISION:-fp16}
+      - FORCE=${FORCE:-0}
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

@@ -1,0 +1,14 @@
+host: 192.168.1.196
+port: 1883
+username: atin
+password: "team1@123#"
+keep_alive: 60
+reconnect_interval_s: 5
+
+company_id: 1
+ai_modules: PLATE
+
+camera_list: "smart_vms/cameras/company/{company_id}"
+get_polygon: "smart_vms/cameras/{camera_code}/zones"
+pub_bbox: "smart_vms/ai/bbox/{camera_code}"
+pub_event: "smart_vms/ai_events/{ai_modules}"

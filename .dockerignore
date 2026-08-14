@@ -1,0 +1,15 @@
+build/
+tests/output/
+scripts/vendor/
+scripts/*.log
+**/__pycache__/
+**/.pytest_cache/
+resources/weights/*.engine
+resources/weights/*.onnx
+resources/weights/*.pt
+resources/weights/*.log
+resources/weights/*.so
+resources/ds/nvdsinfer_custom_impl_Yolo/**/*.o
+resources/ds/nvdsinfer_custom_impl_Yolo/**/*.so
+docs/
+tests/data/
