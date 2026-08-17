@@ -148,6 +148,8 @@ Config Config::load(const std::string& root_dir) {
   const YAML::Node app = loadFile(cfg.resolvePath("resources/config/config.yaml"), true);
   const YAML::Node mqtt = loadFile(cfg.resolvePath("resources/config/mqtt.yaml"), true);
   const YAML::Node restful = loadFile(cfg.resolvePath("resources/config/restful.yaml"), false);
+  const YAML::Node violations =
+      loadFile(cfg.resolvePath("resources/config/violations.yaml"), false);
 
   cfg.ai_module_ = get<std::string>(app, "AI_MODULE", "");
   if (cfg.ai_module_.empty())
@@ -163,7 +165,7 @@ Config Config::load(const std::string& root_dir) {
   }
 
   loadPipeline(app["pipeline"], &cfg.pipeline_);
-  loadViolation(app["violation"], &cfg.violation_);
+  loadViolation(violations["violation"], &cfg.violation_);
 
   MqttConfig& m = cfg.mqtt_;
   m.host = get<std::string>(mqtt, "host", m.host);

@@ -78,11 +78,3 @@ pipeline:
     vehicle_bottom_pad: 10        # nới đáy bbox xe cho khỏi cắt biển
     keypoint_min_confidence: 0.25
     publish_bbox: true
-
-# Vi phạm — chỉ bắn khi VMS bật mã tương ứng trong allowed_codes của camera
-# (topic mqtt.yaml → get_violations).
-violation:
-  helmet:                 # NO_HELMET — chỉ áp dụng cho xe máy (PGIE class 2)
-    enabled: true
-    no_helmet_class_id: 0 # class 0 của helmet model = người không đội mũ
-    min_hits: 1           # số frame tối thiểu detect được mới chốt vi phạm

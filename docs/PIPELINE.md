@@ -332,6 +332,7 @@ phạm thì chỉ bắn event xe thường. Schema khớp
 File runtime (ARCHITECTURE) — chỉ `resources/config/`:
 
 - `config.yaml` — `AI_MODULE`, `plate.*`
+- `violations.yaml` — `violation.*` (helmet)
 - `mqtt.yaml` — broker + topic keys trên
 - `restful.yaml` — `snapshot_api.base_url` / `endpoint`
 

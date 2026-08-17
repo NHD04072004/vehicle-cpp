@@ -1,4 +1,3 @@
-// Load resources/config/{config,mqtt,restful}.yaml → struct dùng trong app.
 #pragma once
 
 #include <cstdint>
@@ -65,7 +64,6 @@ struct TrackerStageConfig {
 };
 
 struct SinkConfig {
-  // "fake" (headless) | "file" (mp4 ra output_file)
   std::string type = "fake";
   std::string output_file = "tests/output/test_result.mp4";
 };
@@ -78,12 +76,11 @@ struct ProbeConfig {
   double square_plate_ratio = 0.50;
   int min_plate_width = 20;
   double vehicle_bottom_pad = 10.0;
-  // Khớp config_preprocess_warp_plate.txt → keypoint_min_confidence.
   float keypoint_min_confidence = 0.25f;
   bool publish_bbox = true;
 };
 
-// `pipeline.*` trong config.yaml — pipeline/probes dùng (PIPELINE.md §7).
+// `pipeline.*` trong config.yaml — pipeline/probes dùng.
 struct PipelineConfig {
   RtspConfig rtsp;
   StreammuxConfig streammux;
@@ -149,13 +146,11 @@ class Config {
 
   std::string cameraListTopic() const;
   std::string zonesTopic(const std::string& camera_code) const;
-  // camera_id = "+" → topic wildcard để subscribe mọi camera.
   std::string violationsTopic(const std::string& camera_id) const;
   std::string bboxTopic(const std::string& camera_code) const;
   std::string eventTopic() const;
   std::string uploadUrl() const;
 
-  // Đường dẫn tương đối → tuyệt đối theo rootDir(); đường dẫn tuyệt đối giữ nguyên.
   std::string resolvePath(const std::string& path) const;
 
  private:

@@ -325,6 +325,14 @@ volumes:
 | `pipeline.probe.anchor_bottom_ratio` | Neo ROI |
 | `pipeline.probe.publish_bbox` | Bật/tắt MQTT bbox |
 
+### `resources/config/violations.yaml`
+
+| Key | Ý nghĩa |
+|-----|---------|
+| `violation.helmet.enabled` | Bật/tắt kiểm tra vi phạm không đội mũ bảo hiểm |
+| `violation.helmet.no_helmet_class_id` | Class 0 của helmet model = người không đội mũ |
+| `violation.helmet.min_hits` | Số frame tối thiểu detect được mới chốt vi phạm |
+
 ### `resources/config/mqtt.yaml` / `restful.yaml`
 
 - Broker, credential, `company_id`

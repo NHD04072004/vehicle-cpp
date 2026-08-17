@@ -143,7 +143,8 @@ Env bắt buộc cho mux v2: `USE_NEW_NVSTREAMMUX=yes` (đã set trong `vehicle.
 
 | Path | Tác dụng |
 |------|----------|
-| `config/config.yaml` | `AI_MODULE`, `plate.*`, `violation.*` (helmet), `pipeline.*` lồng nhau: `rtsp` / `streammux` (v2) / `pgie` / `sgie_*` / `tracker` / `sink` / `probe`. |
+| `config/config.yaml` | `AI_MODULE`, `plate.*`, `pipeline.*` lồng nhau: `rtsp` / `streammux` (v2) / `pgie` / `sgie_*` / `tracker` / `sink` / `probe`. |
+| `config/violations.yaml` | `violation.*` (helmet). |
 | `config/mqtt.yaml` | Broker MQTT + `company_id` / `ai_modules` + topic keys. |
 | `config/restful.yaml` | `snapshot_api`: `base_url`, `endpoint` (upload snapshot). |
 | `ds/infer/` | Config nvinfer/preprocess (`pgie_vehicle`, `sgie1_plate_pose`, warp, `sgie2_digit`, `sgie3_helmet`) + labels. |
