@@ -88,6 +88,9 @@ struct PlateEmit {
   int vehicle_cls = -1;  // -1 nếu chưa vote được
   JpegImage full_frame;
   JpegImage plate_crop;
+  // Vi phạm không đội mũ (SGIE3, chỉ xe máy).
+  int no_helmet_frames = 0;  // số frame detect được người không đội mũ
+  int no_helmet_count = 0;   // số người không đội mũ nhiều nhất trong 1 frame
   // Mốc monotonic (giây) — latency debug.
   double created_at_s = 0.0;
   double first_ocr_at_s = 0.0;

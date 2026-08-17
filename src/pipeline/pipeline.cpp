@@ -18,6 +18,14 @@ bool fileExists(const std::string& path) {
   return !path.empty() && ::stat(path.c_str(), &st) == 0;
 }
 
+void configureGpuOsd(GstElement* osd) {
+  if (osd == nullptr) return;
+  g_object_set(G_OBJECT(osd), "display-text", FALSE, "display-bbox", FALSE, nullptr);
+  GObjectClass* klass = G_OBJECT_GET_CLASS(osd);
+  if (g_object_class_find_property(klass, "display-mask") != nullptr)
+    g_object_set(G_OBJECT(osd), "display-mask", FALSE, nullptr);
+}
+
 std::string dirName(const std::string& path) {
   const size_t slash = path.find_last_of('/');
   return slash == std::string::npos ? std::string(".") : path.substr(0, slash);
@@ -323,10 +331,12 @@ bool Pipeline::buildSink(GstElement** first, GstElement** last) {
   GstElement* converter = makeElement("nvvideoconvert", "sink_converter");
   GstElement* osd = makeElement("nvdsosd", "osd");
   if (converter == nullptr || osd == nullptr) return false;
-  g_object_set(G_OBJECT(osd), "display-text", FALSE, "display-bbox", FALSE, nullptr);
+  g_object_set(G_OBJECT(converter), "nvbuf-memory-type", 0, nullptr);
+  configureGpuOsd(osd);
   gst_bin_add_many(GST_BIN(pipeline_), converter, osd, nullptr);
   if (!gst_element_link(converter, osd)) return false;
   *first = converter;
+  *last = osd;
 
   if (sink_cfg.type == "file") {
     GstElement* post = makeElement("nvvideoconvert", "encoder_converter");
@@ -347,7 +357,6 @@ bool Pipeline::buildSink(GstElement** first, GstElement** last) {
       return false;
     }
     LOG_INFO("pipeline: sink=file → %s", path.c_str());
-    *last = osd;
     return true;
   }
 
@@ -360,7 +369,7 @@ bool Pipeline::buildSink(GstElement** first, GstElement** last) {
   g_object_set(G_OBJECT(sink), "sync", FALSE, "async", FALSE, nullptr);
   gst_bin_add(GST_BIN(pipeline_), sink);
   if (!gst_element_link(osd, sink)) return false;
-  *last = osd;
+  LOG_INFO("pipeline: sink=fake");
   return true;
 }
 
@@ -471,6 +480,21 @@ bool Pipeline::build(const std::vector<SourceSpec>& sources) {
     } else {
       LOG_WARN("pipeline: %s chưa có model — bỏ SGIE2 (không OCR ký tự)", sgie2_path.c_str());
     }
+
+    // SGIE3 mũ bảo hiểm — PHẢI đứng sau mốc restore ROI.
+    const std::string sgie3_path = config_.resolvePath(cfg.sgie_helmet.config);
+    if (inferReady(sgie3_path)) {
+      GstElement* sgie3 = makeElement("nvinfer", "sgie_helmet");
+      if (sgie3 == nullptr) return false;
+      g_object_set(G_OBJECT(sgie3), "config-file-path", sgie3_path.c_str(), "unique-id",
+                   cfg.sgie_helmet.unique_id, "process-mode", 2, nullptr);
+      stages.push_back(sgie3);
+      LOG_INFO("pipeline: sgie_helmet %s (unique-id=%d, chỉ xe máy)", sgie3_path.c_str(),
+               cfg.sgie_helmet.unique_id);
+    } else {
+      LOG_WARN("pipeline: %s chưa có model — bỏ SGIE3 (không bắn NO_HELMET)",
+               sgie3_path.c_str());
+    }
   } else {
     LOG_WARN("pipeline: %s chưa có model — chạy passthrough (chỉ decode + sink)",
              pgie_path.c_str());
@@ -533,10 +557,13 @@ bool Pipeline::build(const std::vector<SourceSpec>& sources) {
       probe_->attachMetaProbe(meta_pad);
       gst_object_unref(meta_pad);
     }
-    GstPad* image_pad = gst_element_get_static_pad(sink_last, "src");
-    if (image_pad != nullptr) {
-      probe_->attachImageProbe(image_pad);
-      gst_object_unref(image_pad);
+    // JPEG full-frame sau nvdsosd — bbox đã blend trên GPU.
+    if (sink_last != nullptr) {
+      GstPad* image_pad = gst_element_get_static_pad(sink_last, "src");
+      if (image_pad != nullptr) {
+        probe_->attachImageProbe(image_pad);
+        gst_object_unref(image_pad);
+      }
     }
   }
 

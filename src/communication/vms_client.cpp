@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <memory>
 #include <sstream>
 #include <thread>
@@ -118,6 +119,22 @@ const Json::Value* findZonesArray(const Json::Value& root) {
   return nullptr;
 }
 
+// Tách giá trị ở vị trí `marker` của template khi topic khớp prefix/suffix.
+bool matchTemplate(const std::string& topic, const std::string& tpl, const char* marker,
+                   std::string* value) {
+  const size_t at = tpl.find(marker);
+  if (at == std::string::npos) return false;
+  const std::string prefix = tpl.substr(0, at);
+  const std::string suffix = tpl.substr(at + std::strlen(marker));
+  if (topic.size() <= prefix.size() + suffix.size()) return false;
+  if (topic.compare(0, prefix.size(), prefix) != 0) return false;
+  if (!suffix.empty() &&
+      topic.compare(topic.size() - suffix.size(), suffix.size(), suffix) != 0)
+    return false;
+  *value = topic.substr(prefix.size(), topic.size() - prefix.size() - suffix.size());
+  return !value->empty();
+}
+
 }  // namespace
 
 VmsClient::VmsClient(const Config& config, MqttClient* mqtt)
@@ -145,7 +162,9 @@ bool VmsClient::start() {
         onMessage(topic, payload);
       });
   const std::string zones_wildcard = config_.zonesTopic("+");
-  return mqtt_->subscribe({config_.cameraListTopic(), zones_wildcard});
+  const std::string violations_wildcard = config_.violationsTopic("+");
+  return mqtt_->subscribe(
+      {config_.cameraListTopic(), zones_wildcard, violations_wildcard});
 }
 
 void VmsClient::onMessage(const std::string& topic, const std::string& payload) {
@@ -153,27 +172,26 @@ void VmsClient::onMessage(const std::string& topic, const std::string& payload) 
     handleCameraList(payload);
     return;
   }
-  std::string camera_code;
-  if (matchZonesTopic(topic, &camera_code)) {
-    handleZones(camera_code, payload);
+  std::string key;
+  if (matchZonesTopic(topic, &key)) {
+    handleZones(key, payload);
+    return;
+  }
+  if (matchViolationsTopic(topic, &key)) {
+    handleViolations(key, payload);
     return;
   }
   LOG_DEBUG("mqtt: bỏ qua topic lạ %s", topic.c_str());
 }
 
 bool VmsClient::matchZonesTopic(const std::string& topic, std::string* camera_code) const {
-  const std::string tpl = config_.mqtt().get_polygon_tpl;
-  const size_t marker = tpl.find("{camera_code}");
-  if (marker == std::string::npos) return false;
-  const std::string prefix = tpl.substr(0, marker);
-  const std::string suffix = tpl.substr(marker + std::string("{camera_code}").size());
-  if (topic.size() <= prefix.size() + suffix.size()) return false;
-  if (topic.compare(0, prefix.size(), prefix) != 0) return false;
-  if (!suffix.empty() &&
-      topic.compare(topic.size() - suffix.size(), suffix.size(), suffix) != 0)
-    return false;
-  *camera_code = topic.substr(prefix.size(), topic.size() - prefix.size() - suffix.size());
-  return !camera_code->empty();
+  return matchTemplate(topic, config_.mqtt().get_polygon_tpl, "{camera_code}", camera_code);
+}
+
+bool VmsClient::matchViolationsTopic(const std::string& topic, std::string* camera_id) const {
+  // violationsTopic() đã thay {ai_modules}; chỉ còn {camera_id} là biến.
+  return matchTemplate(topic, config_.violationsTopic("{camera_id}"), "{camera_id}",
+                       camera_id);
 }
 
 void VmsClient::handleCameraList(const std::string& payload) {
@@ -255,6 +273,43 @@ void VmsClient::handleZones(const std::string& camera_code, const std::string& p
     zones_[camera_code] = set;
   }
   if (zones_cb_) zones_cb_(set);
+}
+
+void VmsClient::handleViolations(const std::string& camera_id, const std::string& payload) {
+  if (violations_ == nullptr) return;
+  Json::Value root;
+  if (!parseJson(payload, &root)) {
+    LOG_WARN("violations[%s]: payload không phải JSON hợp lệ", camera_id.c_str());
+    return;
+  }
+
+  // Payload chuẩn là object (schema_version=1); chấp nhận list trần phòng VMS đổi format.
+  const Json::Value* codes = nullptr;
+  bool module_enabled = true;
+  if (root.isArray()) {
+    codes = &root;
+  } else if (root.isObject()) {
+    if (root.isMember("module_enabled") && root["module_enabled"].isBool())
+      module_enabled = root["module_enabled"].asBool();
+    for (const char* key : {"allowed_codes", "violations", "data", "items"}) {
+      if (root.isMember(key) && root[key].isArray()) {
+        codes = &root[key];
+        break;
+      }
+    }
+  }
+  if (codes == nullptr) {
+    LOG_WARN("violations[%s]: không tìm thấy allowed_codes", camera_id.c_str());
+    return;
+  }
+
+  std::vector<std::string> allowed;
+  for (const Json::Value& item : *codes)
+    if (item.isString()) allowed.push_back(item.asString());
+
+  violations_->updateFromMqtt(camera_id, module_enabled, allowed);
+  LOG_INFO("violations[%s]: enabled=%d, %zu mã được bật", camera_id.c_str(),
+           module_enabled ? 1 : 0, allowed.size());
 }
 
 std::vector<Camera> VmsClient::cameras() const {

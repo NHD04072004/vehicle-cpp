@@ -101,6 +101,7 @@ void loadPipeline(const YAML::Node& pipe, PipelineConfig* p) {
     }
   }
   loadGie(pipe["sgie_digit"], &p->sgie_digit);
+  loadGie(pipe["sgie_helmet"], &p->sgie_helmet);
 
   const YAML::Node tracker = pipe["tracker"];
   p->tracker.ll_config = get<std::string>(tracker, "ll_config", p->tracker.ll_config);
@@ -128,6 +129,16 @@ void loadPipeline(const YAML::Node& pipe, PipelineConfig* p) {
   p->probe.publish_bbox = get<bool>(probe, "publish_bbox", p->probe.publish_bbox);
 }
 
+void loadViolation(const YAML::Node& node, ViolationConfig* v) {
+  if (!node || !node.IsMap()) return;
+  const YAML::Node helmet = node["helmet"];
+  v->helmet.enabled = get<bool>(helmet, "enabled", v->helmet.enabled);
+  v->helmet.no_helmet_class_id =
+      get<int>(helmet, "no_helmet_class_id", v->helmet.no_helmet_class_id);
+  v->helmet.min_hits = get<int>(helmet, "min_hits", v->helmet.min_hits);
+  if (v->helmet.min_hits < 1) v->helmet.min_hits = 1;
+}
+
 }  // namespace
 
 Config Config::load(const std::string& root_dir) {
@@ -152,6 +163,7 @@ Config Config::load(const std::string& root_dir) {
   }
 
   loadPipeline(app["pipeline"], &cfg.pipeline_);
+  loadViolation(app["violation"], &cfg.violation_);
 
   MqttConfig& m = cfg.mqtt_;
   m.host = get<std::string>(mqtt, "host", m.host);
@@ -166,6 +178,7 @@ Config Config::load(const std::string& root_dir) {
   m.ai_modules = cfg.ai_module_;
   m.camera_list_tpl = get<std::string>(mqtt, "camera_list", m.camera_list_tpl);
   m.get_polygon_tpl = get<std::string>(mqtt, "get_polygon", m.get_polygon_tpl);
+  m.get_violations_tpl = get<std::string>(mqtt, "get_violations", m.get_violations_tpl);
   m.pub_bbox_tpl = get<std::string>(mqtt, "pub_bbox", m.pub_bbox_tpl);
   m.pub_event_tpl = get<std::string>(mqtt, "pub_event", m.pub_event_tpl);
 
@@ -190,6 +203,12 @@ std::string Config::cameraListTopic() const {
 
 std::string Config::zonesTopic(const std::string& camera_code) const {
   return utils::replaceAll(mqtt_.get_polygon_tpl, "{camera_code}", camera_code);
+}
+
+std::string Config::violationsTopic(const std::string& camera_id) const {
+  std::string topic = utils::replaceAll(mqtt_.get_violations_tpl, "{camera_id}", camera_id);
+  topic = utils::replaceAll(topic, "{ai_modules}", mqtt_.ai_modules);
+  return utils::replaceAll(topic, "{ai_module}", mqtt_.ai_modules);
 }
 
 std::string Config::bboxTopic(const std::string& camera_code) const {

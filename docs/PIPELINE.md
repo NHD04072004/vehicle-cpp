@@ -48,8 +48,10 @@ RTSP (restream_urls.PLATE)
   → nvtracker — track_id
   → SGIE1 nvinfer — detect biển trên ROI xe (expand 30%)
   → SGIE2 nvinfer — detect ký tự trên crop biển
-  → src/probes — ROI polygon + thu thập OCR theo track
+  → SGIE3 nvinfer — detect mũ bảo hiểm, CHỈ trên bbox xe máy
+  → src/probes — ROI polygon + thu thập OCR / vi phạm theo track
   → src/business/plate — vote n lần → validate → payload
+  → src/business/violation — lọc mã vi phạm VMS cho phép theo camera
   → src/communication — upload + MQTT bbox/event
 ```
 
@@ -57,9 +59,10 @@ RTSP (restream_urls.PLATE)
 
 ```text
 Frame → Vehicle (PGIE + tracker) → Plate (SGIE1) → Digits (SGIE2)
+                                 → Helmet (SGIE3, chỉ xe máy)
 ```
 
-**Nguyên tắc emit:** OCR liên tục trong polygon đến khi ra khỏi zone (cấp tối đa `max_recognize_times`, mặc định 5); chọn biển đẹp nhất + snapshot đẹp nhất; qua `send_mode` / dedup. `payload.direction` luôn `null`.
+**Nguyên tắc emit:** OCR liên tục trong polygon đến khi ra khỏi zone (cấp tối đa `max_recognize_times`, mặc định 5); chọn biển đẹp nhất + snapshot đẹp nhất; qua `send_mode` / dedup. Event xe: `payload.direction` luôn `null`. Event vi phạm: `direction = "IN"`.
 
 ---
 
@@ -74,7 +77,13 @@ Frame → Vehicle (PGIE + tracker) → Plate (SGIE1) → Digits (SGIE2)
 | Detect biển | SGIE1 `nvinfer` | `last_keypoint` YOLO-Pose 640, 4 keypoints; `sgie1_plate_pose.txt`; conf 0.25 |
 | Warp biển | `nvdspreprocess` | `config_preprocess_warp_plate.txt` → `libnvdspreprocess_custom_warp_perspective.so` |
 | OCR | SGIE2 `nvinfer` | `digit_n_p3p4_256.pt` (YOLO11n 256, 36 class), `input-tensor-meta=1`; conf 0.25 |
-| OSD / sink | `nvdsosd` → sink | `fake` (production), `osd`, hoặc `file` (ghi mp4) |
+| Mũ bảo hiểm | SGIE3 `nvinfer` | `helmet_ylv8_171125.pt` (YOLOv8s 640, 3 class), `sgie3_helmet.txt`; `operate-on-class-ids=2` (chỉ xe máy); conf 0.85 |
+| OSD / sink | `nvvideoconvert` → `nvdsosd` (tắt vẽ) → `fakesink` / file | Full-frame JPEG rồi **vẽ 1 bbox xanh lúc emit** trên đúng track. |
+
+> **SGIE3 phải là stage nvinfer cuối cùng.** `attachRoiExpandProbe` nới bbox xe 30 %
+> trên sink của SGIE1 và `attachRoiRestoreProbe` trả bbox gốc trên **src của SGIE2**.
+> Nếu SGIE3 nằm giữa hai mốc đó, nó sẽ crop ROI đã phình thay vì bbox xe thật —
+> khác với `phatnguoi_mbf` (chạy helmet trên đúng crop xe).
 
 **Parser:** PGIE/digit dùng `NvDsInferParseYolo`
 (`resources/ds/nvdsinfer_custom_impl_Yolo/` → `libnvdsinfer_custom_impl_Yolo.so`).
@@ -198,7 +207,7 @@ Dedup cache (≈50): trùng `track_id` hoặc trùng chuỗi biển đã bắn �
 3. Đã chốt biển (đủ max **hoặc** rời zone) / miss-track retry  
 4. Pass `send_mode`  
 5. Có ảnh để upload  
-6. `communication` upload + `pub_event` (`direction = null`)
+6. `communication` upload + `pub_event` (xe: `direction=null`; vi phạm: `direction=IN`)
 
 ### 5.5 Attribute phụ (phase sau)
 
@@ -267,7 +276,7 @@ Config: `resources/config/restful.yaml` → `snapshot_api`
         "status": "DETECTED",
         "plate_color": null
       },
-      "vehicle_type": "Ô TÔ",
+      "vehicle_type": "Ô tô",
       "car_type": null,
       "manufacturer": null,
       "color": null,
@@ -279,7 +288,42 @@ Config: `resources/config/restful.yaml` → `snapshot_api`
 }
 ```
 
-Map class sau vote: `0→Ô TÔ`, `1→XE MÁY`, `2→XE TẢI`.
+Map class sau vote: `1→Ô tô`, `2→Xe máy`, `3→Xe tải`, `0→Xe khách`.
+
+### 6.4 Event vi phạm (NO_HELMET)
+
+VMS gửi **retained** danh sách mã vi phạm được bật cho từng camera qua
+`get_violations` = `smart_vms/ai_config/state/{camera_id}/{ai_modules}/violations`
+(khoá là `camera_id` UUID, **không** phải `camera_code`):
+
+```json
+{"schema_version": 1, "camera_id": "<uuid>", "camera_code": "vanninh",
+ "module_code": "PLATE", "module_enabled": true,
+ "allowed_codes": ["NO_HELMET", "RED_LIGHT", "…"], "revision": 0}
+```
+
+`VmsClient` subscribe wildcard `+` cho `{camera_id}` và nạp vào
+`business::violation::ConfigStore`. Vi phạm chỉ được bắn khi
+`module_enabled = true` **và** mã nằm trong `allowed_codes` của camera đó.
+
+Khi một track xe máy có ≥ `violation.helmet.min_hits` frame detect được người không
+đội mũ **và** camera bật `NO_HELMET`, app **chỉ** bắn event vi phạm trên `pub_event`
+(không gửi kèm event xe — khớp `phatnguoi_mbf` VehicleEventPublisher). Không có vi
+phạm thì chỉ bắn event xe thường. Schema khớp
+`tests/test_proto/test_pub_mqtt_violation.py`:
+
+```json
+"payload": {
+  "direction": "IN",
+  "vehicle": { "…": "như event xe" },
+  "violation_type_code": "NO_HELMET",
+  "violation_evidence": { "road_type": "highway" }
+}
+```
+
+Điều kiện bắn (khớp `phatnguoi_mbf/gsan/controller/thread/vehicle/general_thread.py`):
+`violation.helmet.enabled` **và** class sau vote = `Xe máy` **và** đủ `min_hits`
+**và** camera bật `NO_HELMET`.
 
 ---
 
@@ -346,7 +390,7 @@ Reference Python (`tests/business/plate_rules/`) khóa hành vi `src/business/pl
 |---------------|------|--------------------|
 | `constants`/`validate`/`fuse`/`normalize`/`send_mode` | style, vote, normalize, send_mode | `src/business/plate/rules.cpp` |
 | `track_state` | OCR trong polygon đến leave/max, chọn biển+snapshot đẹp nhất, miss/force-delete, dedup | `src/business/plate/track.cpp` |
-| `event` | payload MQTT, `direction=null`, map loại xe | `src/business/plate/event.cpp` |
+| `event` | payload MQTT, map loại xe; vi phạm thêm `violation_type_code` | `src/business/plate/event.cpp` |
 
 `tests/business_cpp/test_business.cpp` chạy lại đúng bộ case này trên bản C++ (thêm
 `plate_recognizer` — cổng emit, và `char_assembler` — ghép ký tự §4.3).
@@ -456,7 +500,7 @@ camera nhanh về đúng 25 fps và cắt độ trễ 595 ms → 82 ms.
 |---|--------|-----------|---------|
 | 1 | `common/` | ✅ | `Config::load` đọc `config/mqtt/restful.yaml` (+ block `pipeline:`); DTO camera/zone/detection/event |
 | 2 | `communication/` | ✅ | MQTT qua `nvds_msgapi` + `libnvds_mqtt_proto.so`; sub camera_list/zones; pub bbox/event; upload multipart bằng libcurl |
-| 3 | `pipeline/` | ✅ | `nvurisrcbin` → `nvstreammux` v2 → PGIE → `nvtracker` → SGIE1 → SGIE2 → OSD → sink (`fake`/`osd`/`file`) |
+| 3 | `pipeline/` | ✅ | `nvurisrcbin` → mux → PGIE → tracker → SGIE1 → SGIE2 → SGIE3 → `nvdsosd` (GPU) → sink (`fake`/`file`) |
 | 4 | `probes/` | ✅ | Probe A: ROI polygon, phân tầng meta, pub bbox, enqueue JPEG; Probe B: đọc `NVDS_CROP_IMAGE_META` + cổng emit |
 | 5 | SGIE1/warp/SGIE2 | ✅ | Pose + warp preprocess + digit tensor; custom `.so` build bởi CMake từ `resources/ds/` |
 | 6 | `business/plate/` | ✅ | rules + track + event + `plate_recognizer` |

@@ -23,6 +23,8 @@ struct PendingEmit {
   double first_ocr_at_s = 0.0;
   double final_at_s = 0.0;
   int recognize_count = 0;
+  int no_helmet_frames = 0;
+  int no_helmet_count = 0;
 };
 
 class PlateRecognizer {
@@ -32,6 +34,9 @@ class PlateRecognizer {
   // Cập nhật in/out zone + vote class. true nếu vừa chốt (miss grace).
   bool observeVehicle(uint64_t track_id, int cls, double cls_conf, bool in_zone,
                       double now_s);
+
+  // Kết quả SGIE helmet của 1 frame (chỉ gọi cho xe máy đang trong zone).
+  void observeHelmet(uint64_t track_id, int no_helmet_count);
 
   // OCR + cập nhật mẫu snapshot theo chuỗi biển.
   PlateOcrStatus addOcrReading(uint64_t track_id, const CharSequence& chars,

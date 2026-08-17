@@ -91,9 +91,21 @@ struct PipelineConfig {
   GieConfig sgie_plate = {"resources/ds/infer/sgie1_plate_pose.txt", 2};
   PreprocessConfig preprocess_plate;
   GieConfig sgie_digit = {"resources/ds/infer/sgie2_digit.txt", 3};
+  GieConfig sgie_helmet = {"resources/ds/infer/sgie3_helmet.txt", 4};
   TrackerStageConfig tracker;
   SinkConfig sink;
   ProbeConfig probe;
+};
+
+// `violation.helmet.*` — vi phạm không đội mũ bảo hiểm (chỉ xe máy).
+struct HelmetViolationConfig {
+  bool enabled = true;
+  int no_helmet_class_id = 0;  // class 0 của helmet model = người không đội mũ
+  int min_hits = 1;            // số frame tối thiểu detect được mới chốt vi phạm
+};
+
+struct ViolationConfig {
+  HelmetViolationConfig helmet;
 };
 
 struct MqttConfig {
@@ -109,6 +121,8 @@ struct MqttConfig {
 
   std::string camera_list_tpl = "smart_vms/cameras/company/{company_id}";
   std::string get_polygon_tpl = "smart_vms/cameras/{camera_code}/zones";
+  std::string get_violations_tpl =
+      "smart_vms/ai_config/state/{camera_id}/{ai_modules}/violations";
   std::string pub_bbox_tpl = "smart_vms/ai/bbox/{camera_code}";
   std::string pub_event_tpl = "smart_vms/ai_events/{ai_modules}";
 };
@@ -126,6 +140,7 @@ class Config {
   const std::string& aiModule() const { return ai_module_; }
   const PlateConfig& plate() const { return plate_; }
   const PipelineConfig& pipeline() const { return pipeline_; }
+  const ViolationConfig& violation() const { return violation_; }
   const MqttConfig& mqtt() const { return mqtt_; }
   const SnapshotApiConfig& snapshotApi() const { return snapshot_; }
 
@@ -134,6 +149,8 @@ class Config {
 
   std::string cameraListTopic() const;
   std::string zonesTopic(const std::string& camera_code) const;
+  // camera_id = "+" → topic wildcard để subscribe mọi camera.
+  std::string violationsTopic(const std::string& camera_id) const;
   std::string bboxTopic(const std::string& camera_code) const;
   std::string eventTopic() const;
   std::string uploadUrl() const;
@@ -146,6 +163,7 @@ class Config {
   std::string ai_module_ = "PLATE";
   PlateConfig plate_;
   PipelineConfig pipeline_;
+  ViolationConfig violation_;
   MqttConfig mqtt_;
   SnapshotApiConfig snapshot_;
 };

@@ -46,7 +46,7 @@ Smart VMS / storage
 | SGIE2 | Detect ký tự trên crop biển |
 | Probe + business | Zone filter → vote multi-frame → emit event |
 
-Phạm vi hiện tại: **LPR (`AI_MODULE=PLATE`)**. Không line crossing IN/OUT. `payload.direction` luôn `null`.
+Phạm vi hiện tại: **LPR (`AI_MODULE=PLATE`)**. Không line crossing IN/OUT. Event xe: `payload.direction` = `null`. Event vi phạm: `direction = "IN"`.
 
 ---
 
@@ -86,7 +86,9 @@ RTSP / file
   → SGIE1 nvinfer           last_keypoint_b8_fp16.engine   (pose, operate-on PGIE)
   → nvdspreprocess          warp perspective (operate-on SGIE1)
   → SGIE2 nvinfer           digit_n_p3p4_256_b16_fp16.engine (input-tensor-meta)
-  → pad-probe (plate_probe)
+  → pad-probe meta (src SGIE cuối)
+  → nvvideoconvert → nvdsosd
+  → pad-probe JPEG + vẽ bbox lúc emit
   → sink                    fake | file
 ```
 
@@ -175,7 +177,7 @@ State theo **`track_id`**:
 3. Pass `send_mode`  
 4. Có ảnh → upload HTTP → `pub_event`
 
-Map class: `0→Ô TÔ`, `1→XE MÁY`, `2→XE TẢI`.
+Map class: `1→Ô tô`, `2→Xe máy`, `3→Xe tải`, `0→Xe khách`.
 
 ---
 

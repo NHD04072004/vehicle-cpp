@@ -12,7 +12,6 @@ namespace vehicle {
 namespace business {
 namespace plate {
 
-// 0→"Ô TÔ", 1→"XE MÁY", 2→"XE TẢI"; khác → null (chuỗi rỗng + has=false).
 bool mapVehicleType(int cls, std::string* out_text);
 
 struct EventParams {
@@ -25,10 +24,14 @@ struct EventParams {
   std::string event_time;          // UTC ISO
   std::string ai_modules = "PLATE";
   std::string plate_color;         // rỗng → null
+  std::string direction;           // rỗng → null; violation mặc định "IN"
 };
 
-// direction luôn null (không có line crossing).
 Json::Value buildVehicleEvent(const EventParams& params);
+
+Json::Value buildViolationEvent(const EventParams& params,
+                                const std::string& violation_type_code,
+                                const Json::Value& evidence);
 
 // Payload `pub_bbox` realtime.
 Json::Value buildBboxPayload(const std::string& camera_code, const std::string& ai_modules,

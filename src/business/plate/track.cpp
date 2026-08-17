@@ -170,6 +170,12 @@ void TrackPlateState::addClass(int cls, double conf) {
   list_cls_.emplace_back(cls, conf);
 }
 
+void TrackPlateState::addHelmetObservation(int no_helmet_count) {
+  if (no_helmet_count <= 0) return;
+  ++no_helmet_frames_;
+  if (no_helmet_count > max_no_helmet_count_) max_no_helmet_count_ = no_helmet_count;
+}
+
 int TrackPlateState::votedCls() const {
   if (list_cls_.empty()) return -1;
 

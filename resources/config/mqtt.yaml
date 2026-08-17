@@ -10,5 +10,6 @@ ai_modules: PLATE
 
 camera_list: "smart_vms/cameras/company/{company_id}"
 get_polygon: "smart_vms/cameras/{camera_code}/zones"
+get_violations: "smart_vms/ai_config/state/{camera_id}/{ai_modules}/violations"
 pub_bbox: "smart_vms/ai/bbox/{camera_code}"
 pub_event: "smart_vms/ai_events/{ai_modules}"

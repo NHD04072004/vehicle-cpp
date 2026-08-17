@@ -71,6 +71,10 @@ class TrackPlateState {
   void markPosted() { is_posted_ = true; }
   void addClass(int cls, double conf = 0.0);
 
+  // 1 lần chạy SGIE helmet trên track: no_helmet_count = số người không đội mũ
+  // trong frame đó (0 = frame sạch, không tính là hit).
+  void addHelmetObservation(int no_helmet_count);
+
   // Class: nhiều phiếu nhất; hoà → tổng conf cao hơn. -1 nếu chưa có.
   int votedCls() const;
 
@@ -87,6 +91,8 @@ class TrackPlateState {
   double createdAtS() const { return created_at_s_; }
   double firstOcrAtS() const { return first_ocr_at_s_; }
   double finalAtS() const { return final_at_s_; }
+  int noHelmetFrames() const { return no_helmet_frames_; }
+  int noHelmetCount() const { return max_no_helmet_count_; }
 
  private:
   bool finalizePlate(double now_s);
@@ -110,6 +116,8 @@ class TrackPlateState {
   bool is_pushed_ = false;
   bool is_posted_ = false;
   std::vector<std::pair<int, double>> list_cls_;  // (cls, conf)
+  int no_helmet_frames_ = 0;
+  int max_no_helmet_count_ = 0;
   // Chuỗi biển raw → điểm mẫu tốt nhất (phatnguoi _sample_by_plate).
   std::map<std::string, SnapshotScore> samples_by_plate_;
   std::string best_snapshot_key_;

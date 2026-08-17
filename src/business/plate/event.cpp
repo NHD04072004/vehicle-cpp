@@ -37,7 +37,8 @@ Json::Value buildVehicleEvent(const EventParams& params) {
   vehicle_node["total_number_of_seats"] = Json::Value();
 
   Json::Value payload(Json::objectValue);
-  payload["direction"] = Json::Value();  // luôn null — không có line crossing
+  payload["direction"] =
+      params.direction.empty() ? Json::Value() : Json::Value(params.direction);
   payload["vehicle"] = vehicle_node;
 
   Json::Value event(Json::objectValue);
@@ -49,6 +50,15 @@ Json::Value buildVehicleEvent(const EventParams& params) {
   event["payload"] = payload;
   event["snapshot_url"] = params.snapshot_url;
   event["snapshot_base64"] = params.snapshot_plate_key;
+  return event;
+}
+
+Json::Value buildViolationEvent(const EventParams& params,
+                                const std::string& violation_type_code,
+                                const Json::Value& evidence) {
+  Json::Value event = buildVehicleEvent(params);
+  event["payload"]["violation_type_code"] = violation_type_code;
+  event["payload"]["violation_evidence"] = evidence;
   return event;
 }
 

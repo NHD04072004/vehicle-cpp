@@ -10,6 +10,7 @@
 #include <thread>
 #include <vector>
 
+#include "business/violation/config_store.h"
 #include "common/config.h"
 #include "common/logging.h"
 #include "communication/event_publisher.h"
@@ -149,11 +150,16 @@ int main(int argc, char** argv) {
       LOG_WARN("mqtt: không kết nối được broker — chạy tiếp (--source)");
   }
 
+  // Cấu hình vi phạm theo camera (allowed_codes) — VMS gửi retained qua get_violations.
+  vehicle::business::violation::ConfigStore violations;
+
   vehicle::comm::VmsClient vms(*config, &mqtt);
-  if (mqtt_ok && !vms.start()) LOG_WARN("mqtt: subscribe camera_list/zones thất bại");
+  vms.setViolationStore(&violations);
+  if (mqtt_ok && !vms.start())
+    LOG_WARN("mqtt: subscribe camera_list/zones/violations thất bại");
 
   vehicle::comm::HttpUploader uploader(*config);
-  vehicle::comm::EventPublisher publisher(*config, &mqtt, &uploader);
+  vehicle::comm::EventPublisher publisher(*config, &mqtt, &uploader, &violations);
   publisher.setDryRun(options.dry_run);
   if (options.dry_run) LOG_INFO("chế độ dry-run: không upload/publish ra ngoài");
   vehicle::probes::PlateProbe probe(*config, &publisher);

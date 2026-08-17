@@ -31,6 +31,7 @@ add_library(vehicle_business STATIC
   src/business/plate/track.cpp
   src/business/plate/event.cpp
   src/business/plate/plate_recognizer.cpp
+  src/business/violation/config_store.cpp
   src/probes/char_assembler.cpp
 )
 target_include_directories(vehicle_business PUBLIC

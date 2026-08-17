@@ -28,7 +28,8 @@ namespace vehicle {
 namespace probes {
 namespace {
 
-constexpr size_t kMaxCachedImages = 64;
+constexpr size_t kMaxCachedImages = 16;
+constexpr size_t kMaxEmitQueue = 8;
 constexpr int kJpegQuality = 80;
 constexpr double kMemStatsIntervalS = 5.0;
 
@@ -71,8 +72,18 @@ BoundingBox toBox(const NvOSD_RectParams& rect) {
   return box;
 }
 
+void retainSingleSnapshot(TrackSnapshots* bank, const std::string& prefer_key) {
+  if (bank == nullptr || prefer_key.empty() || bank->by_plate.size() <= 1) return;
+  auto it = bank->by_plate.find(prefer_key);
+  if (it == bank->by_plate.end()) return;
+  SnapshotImages keep = std::move(it->second);
+  bank->by_plate.clear();
+  bank->by_plate.emplace(prefer_key, std::move(keep));
+}
+
 void pruneSnapshotBanks(std::map<uint64_t, TrackSnapshots>* banks) {
-  while (sampleCount(*banks) > kMaxCachedImages && !banks->empty()) banks->erase(banks->begin());
+  if (banks == nullptr) return;
+  while (banks->size() > kMaxCachedImages) banks->erase(banks->begin());
 }
 
 void pruneOrphanSnapshots(business::plate::PlateRecognizer* manager,
@@ -569,6 +580,7 @@ GstPadProbeReturn PlateProbe::handleMeta(GstPadProbeInfo* info) {
 
   const PipelineConfig& pipe = config_.pipeline();
   const ProbeConfig& probe_cfg = pipe.probe;
+  const HelmetViolationConfig& helmet_cfg = config_.violation().helmet;
   const double now_s = probe_start_s;
 
   NvBufSurface* surface = nullptr;
@@ -598,12 +610,17 @@ GstPadProbeReturn PlateProbe::handleMeta(GstPadProbeInfo* info) {
     std::vector<NvDsObjectMeta*> vehicles;
     std::map<NvDsObjectMeta*, NvDsObjectMeta*> plate_of;      // vehicle → biển conf cao nhất
     std::map<NvDsObjectMeta*, std::vector<CharBox>> chars_of;  // biển → ký tự
+    std::map<NvDsObjectMeta*, int> no_helmet_of;               // xe máy → số người không mũ
 
     for (NvDsMetaList* l_obj = frame->obj_meta_list; l_obj != nullptr; l_obj = l_obj->next) {
       auto* obj = static_cast<NvDsObjectMeta*>(l_obj->data);
       const int component = static_cast<int>(obj->unique_component_id);
       if (component == pipe.pgie.unique_id) {
         vehicles.push_back(obj);
+      } else if (component == pipe.sgie_helmet.unique_id) {
+        if (obj->parent == nullptr) continue;
+        if (obj->class_id != helmet_cfg.no_helmet_class_id) continue;
+        ++no_helmet_of[obj->parent];
       } else if (component == pipe.sgie_plate.unique_id) {
         NvDsObjectMeta* parent = obj->parent;
         if (parent == nullptr) continue;
@@ -621,9 +638,11 @@ GstPadProbeReturn PlateProbe::handleMeta(GstPadProbeInfo* info) {
       }
     }
 
-    LOG_DEBUG("frame %u/src%u: %zu xe (PGIE), %zu biển (SGIE1), %zu nhóm ký tự (SGIE2)",
-              frame->frame_num, frame->source_id, vehicles.size(), plate_of.size(),
-              chars_of.size());
+    LOG_DEBUG(
+        "frame %u/src%u: %zu xe (PGIE), %zu biển (SGIE1), %zu nhóm ký tự (SGIE2), "
+        "%zu xe không mũ (SGIE3)",
+        frame->frame_num, frame->source_id, vehicles.size(), plate_of.size(),
+        chars_of.size(), no_helmet_of.size());
 
     for (NvDsObjectMeta* vehicle : vehicles) {
       if (vehicle->object_id == UNTRACKED_OBJECT_ID) {
@@ -648,6 +667,13 @@ GstPadProbeReturn PlateProbe::handleMeta(GstPadProbeInfo* info) {
 
       state->manager->observeVehicle(track_id, vehicle_cls, vehicle->confidence, in_zone, now_s);
       if (!in_zone) continue;
+
+      // NO_HELMET chỉ áp dụng cho xe máy.
+      if (helmet_cfg.enabled && vehicle_cls == kClassMotorbike) {
+        auto helmet_it = no_helmet_of.find(vehicle);
+        if (helmet_it != no_helmet_of.end())
+          state->manager->observeHelmet(track_id, helmet_it->second);
+      }
 
       // OCR: ghép ký tự; giữ JPEG theo chuỗi biển khi mẫu đẹp hơn.
       auto plate_it = plate_of.find(vehicle);
@@ -714,7 +740,9 @@ GstPadProbeReturn PlateProbe::handleMeta(GstPadProbeInfo* info) {
         if (warped && !warped_jpeg.empty()) {
           JpegImage image;
           image.data = std::move(warped_jpeg);
-          state->snapshots[track_id].by_plate[snap_plate_key].crop = std::move(image);
+          TrackSnapshots& bank = state->snapshots[track_id];
+          bank.by_plate[snap_plate_key].crop = std::move(image);
+          retainSingleSnapshot(&bank, snap_plate_key);
           utils::latencyLog("track %lu jpeg_enc_plate_warp: %.1fms [%s%s]",
                             static_cast<unsigned long>(track_id), utils::msSince(enc_start_s),
                             better_snap ? "best" : "", just_final ? "final" : "");
@@ -877,8 +905,9 @@ GstPadProbeReturn PlateProbe::handleImages(GstPadProbeInfo* info) {
       }
       if (!full_frame.empty()) {
         for (const PendingEncode& pend : waiting) {
-          storeFullSnapshot(&state->snapshots[pend.track_id].by_plate[pend.plate_key],
-                            full_frame, pend);
+          TrackSnapshots& bank = state->snapshots[pend.track_id];
+          storeFullSnapshot(&bank.by_plate[pend.plate_key], full_frame, pend);
+          retainSingleSnapshot(&bank, pend.plate_key);
         }
       }
     }
@@ -900,8 +929,8 @@ GstPadProbeReturn PlateProbe::handleImages(GstPadProbeInfo* info) {
       }
       if (plate_key.empty()) continue;
       // Không ghi đè crop đã warp ở meta probe.
-      auto& snap = state->snapshots[track_id].by_plate[plate_key];
-      if (!snap.crop.empty()) continue;
+      TrackSnapshots& bank = state->snapshots[track_id];
+      if (!bank.by_plate[plate_key].crop.empty()) continue;
       for (NvDsUserMetaList* l_user = obj->obj_user_meta_list; l_user != nullptr;
            l_user = l_user->next) {
         auto* user_meta = static_cast<NvDsUserMeta*>(l_user->data);
@@ -910,7 +939,9 @@ GstPadProbeReturn PlateProbe::handleImages(GstPadProbeInfo* info) {
         if (enc == nullptr || enc->outBuffer == nullptr || enc->outLen == 0) continue;
         JpegImage image;
         image.data.assign(enc->outBuffer, enc->outBuffer + enc->outLen);
-        snap.crop = std::move(image);
+        bank.by_plate[plate_key].crop = std::move(image);
+        retainSingleSnapshot(&bank, plate_key);
+        break;
       }
     }
     pruneSnapshotBanks(&state->snapshots);
@@ -937,7 +968,7 @@ GstPadProbeReturn PlateProbe::handleImages(GstPadProbeInfo* info) {
       }
       if (!state->manager->commitEmit(pending.track_id, pending.plate)) continue;
 
-      // 1 bbox xanh / event — vẽ trên bản JPEG của đúng track (không dùng nvdsosd).
+      // 1 bbox xanh / event trên đúng JPEG của track — không phụ thuộc nvdsosd.
       if (width >= 1.0f && height >= 1.0f) {
         if (!utils::drawGreenRectOnJpeg(&full.data, left, top, width, height)) {
           LOG_WARN("track %lu: vẽ bbox xanh lên JPEG thất bại (%.0fx%.0f @%.0f,%.0f)",
@@ -958,6 +989,8 @@ GstPadProbeReturn PlateProbe::handleImages(GstPadProbeInfo* info) {
       job.emit.first_ocr_at_s = pending.first_ocr_at_s;
       job.emit.final_at_s = pending.final_at_s;
       job.emit.recognize_count = pending.recognize_count;
+      job.emit.no_helmet_frames = pending.no_helmet_frames;
+      job.emit.no_helmet_count = pending.no_helmet_count;
       job.emit.images_ready_at_s = now_s;
       job.emit.full_frame = std::move(full);
       job.emit.plate_crop = std::move(crop);
@@ -1032,10 +1065,22 @@ void PlateProbe::maybeLogMemStats(double now_s) {
 }
 
 void PlateProbe::enqueue(EmitJob job) {
+  size_t dropped = 0;
+  uint64_t dropped_track = 0;
+  std::string dropped_plate;
   {
     std::lock_guard<std::mutex> lock(queue_mutex_);
+    while (queue_.size() >= kMaxEmitQueue) {
+      dropped_track = queue_.front().emit.track_id;
+      dropped_plate = queue_.front().emit.plate;
+      queue_.pop_front();
+      ++dropped;
+    }
     queue_.push_back(std::move(job));
   }
+  if (dropped > 0)
+    LOG_WARN("emit queue đầy (%zu) — drop %zu job cũ (track %lu plate=%s)", kMaxEmitQueue,
+             dropped, static_cast<unsigned long>(dropped_track), dropped_plate.c_str());
   queue_cv_.notify_one();
 }
 

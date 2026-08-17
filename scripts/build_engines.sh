@@ -27,6 +27,7 @@ TRTEXEC="${TRTEXEC:-$(command -v trtexec || echo /usr/src/tensorrt/bin/trtexec)}
 MODELS=(
   "vehicle|vehicle_n_best.pt|640|8"
   "digit_n_p3p4_256|digit_n_p3p4_256.pt|256|16"
+  "helmet|helmet_ylv8_171125.pt|640|16"
 )
 ONLY="${ONLY:-}"
 
@@ -116,6 +117,7 @@ Kiểm tra lại resources/ds/infer/*.txt phải trỏ đúng:
   pgie_vehicle.txt      → vehicle.onnx       / vehicle_b8_fp16.engine        (4 class)
   sgie1_plate_pose.txt  → last_keypoint.onnx / last_keypoint_b8_fp16.engine  (pose, khớp PGIE b8)
   sgie2_digit.txt       → digit_n_p3p4_256.onnx / digit_n_p3p4_256_b16_fp16.engine (36 class)
+  sgie3_helmet.txt      → helmet.onnx        / helmet_b16_fp16.engine        (3 class, chỉ xe máy)
   config_preprocess_warp_plate.txt → build/libs/libnvdspreprocess_custom_warp_perspective.so
 
 Nhãn model xuất ra <name>.labels.txt chỉ để tham chiếu — file nhãn dùng thật là

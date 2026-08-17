@@ -69,6 +69,17 @@ bool PlateRecognizer::observeVehicle(uint64_t track_id, int cls, double cls_conf
   return just_final;
 }
 
+void PlateRecognizer::observeHelmet(uint64_t track_id, int no_helmet_count) {
+  if (no_helmet_count <= 0) return;
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = tracks_.find(track_id);
+  if (it == tracks_.end()) return;
+  it->second.addHelmetObservation(no_helmet_count);
+  LOG_DEBUG("track %lu: helmet %d người không đội mũ (frame thứ %d)",
+            static_cast<unsigned long>(track_id), no_helmet_count,
+            it->second.noHelmetFrames());
+}
+
 PlateOcrStatus PlateRecognizer::addOcrReading(uint64_t track_id, const CharSequence& chars,
                                               const std::string& raw, double now_s,
                                               double mean_conf, double sample_area) {
@@ -148,7 +159,8 @@ std::vector<PendingEmit> PlateRecognizer::collectReady(double now_s) {
     }
     ready.push_back({entry.first, plate, state.votedCls(), state.bestSnapshotKey(),
                      state.createdAtS(), state.firstOcrAtS(), state.finalAtS(),
-                     state.plateRecognizeCount()});
+                     state.plateRecognizeCount(), state.noHelmetFrames(),
+                     state.noHelmetCount()});
   }
   return ready;
 }
