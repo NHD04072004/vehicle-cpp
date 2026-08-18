@@ -1,4 +1,8 @@
-ARG BASE_IMAGE=nhd04072004/ds_app:8.0-amd64
+# TARGETARCH: BuildKit gán amd64|arm64 theo máy (không default — tránh build nhầm arch).
+# Ghi đè: --build-arg TARGETARCH=arm64 --build-arg BASE_IMAGE=nhd04072004/ds_app:8.0-arm64
+ARG TARGETARCH
+ARG BASE_IMAGE=nhd04072004/ds_app:8.0-${TARGETARCH}
+
 
 ## Build stage
 FROM ${BASE_IMAGE} AS build

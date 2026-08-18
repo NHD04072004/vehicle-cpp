@@ -65,13 +65,23 @@ target_include_directories(vehicle PRIVATE
 )
 
 find_library(CUDA_DRIVER_LIB NAMES cuda
-  PATHS /usr/local/cuda/lib64/stubs /usr/lib/x86_64-linux-gnu
+  PATHS
+    /usr/local/cuda/lib64/stubs
+    /usr/local/cuda/targets/x86_64-linux/lib/stubs
+    /usr/local/cuda/targets/aarch64-linux/lib/stubs
+    /usr/lib/x86_64-linux-gnu
+    /usr/lib/aarch64-linux-gnu
   NO_DEFAULT_PATH)
 if(NOT CUDA_DRIVER_LIB)
   message(WARNING "Không tìm thấy libcuda — link có thể lỗi undefined reference cu*")
 endif()
 find_library(CUDART_LIB NAMES cudart
-  PATHS /usr/local/cuda/lib64 /usr/lib/x86_64-linux-gnu
+  PATHS
+    /usr/local/cuda/lib64
+    /usr/local/cuda/targets/x86_64-linux/lib
+    /usr/local/cuda/targets/aarch64-linux/lib
+    /usr/lib/x86_64-linux-gnu
+    /usr/lib/aarch64-linux-gnu
   NO_DEFAULT_PATH)
 find_path(CUDA_INCLUDE_DIR cuda_runtime_api.h
   PATHS /usr/local/cuda/include /usr/include)

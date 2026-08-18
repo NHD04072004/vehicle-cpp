@@ -21,7 +21,8 @@ Warp **giữ tỉ lệ** rồi letterbox pad vào `processing-width`×`processin
 ```bash
 docker run --rm --gpus all --entrypoint bash \
   -v "$PWD":/app -w /app/resources/ds/nvdspreprocess_custom_warp_perspective \
-  nhd04072004/ds_app:8.0-amd64 -c 'make clean CUDA_VER=12.8 && make CUDA_VER=12.8'
+  "nhd04072004/ds_app:8.0-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" \
+  -c 'make clean CUDA_VER=12.8 && make CUDA_VER=12.8'
 cp resources/ds/nvdspreprocess_custom_warp_perspective/libnvdspreprocess_custom_warp_perspective.so \
    resources/weights/
 ```

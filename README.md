@@ -248,13 +248,33 @@ Chi tiết: [`scripts/README.md`](scripts/README.md).
 
 ## 8. Deploy / chạy production
 
+Từ source, đóng gói sang thư mục chạy-only (mặc định `../vehicle_prod`):
+
+```bash
+./deploy.sh
+# hoặc: ./deploy.sh /mnt/atin/nhd/c12/vehicle_prod
+```
+
+Script sẽ: build image runtime, copy `resources/` sang target, convert `.pt`/`.onnx` → TensorRT `.engine` trên GPU máy này, ghi `docker-compose.yaml` **không có `build:`**. Sau đó **có thể xóa source**. Image nằm trong Docker daemon — đừng `docker rmi` / prune image `nhd04072004/vehicle-app:1.0.0`.
+
+```bash
+cd /mnt/atin/nhd/c12/vehicle_prod
+docker compose up -d
+# hoặc: ./restart.sh
+docker logs -f vehicle
+```
+
+`FORCE=1` rebuild engine; `SKIP_BUILD=1` dùng lại image đã có; `SKIP_ENGINES=1` không chạy trtexec.
+
+Kiến trúc **amd64 / arm64** lấy từ máy đang chạy (`uname -m`): base image `nhd04072004/ds_app:8.0-$TARGETARCH`, tcmalloc, CUDA lib path. Ghi đè: `TARGETARCH=arm64 BASE_IMAGE=nhd04072004/ds_app:8.0-arm64 ./deploy.sh`. Engine TensorRT phải build trên đúng GPU/arch của máy đích.
+
 ### Máy đích cần
 
 - NVIDIA driver + **nvidia-container-toolkit**
 - Docker + Docker Compose
 - GPU tương thích với file `.engine` (cùng family GPU / cùng TensorRT càng tốt)
 
-### Mang theo gì
+### Mang theo gì (nếu không dùng `deploy.sh`)
 
 **Không cần cả repo.** Bộ tối thiểu:
 
@@ -274,35 +294,6 @@ deploy/
 | Binary `vehicle`, parser `.so`, default config/ds | `config/`, `ds/`, `weights/*.engine` |
 
 Parser `.so` đã có sẵn trong image tại `/app/build/libs/` — host **không** cần mang `.so`.
-
-### Chạy
-
-```bash
-# 1) (Nếu GPU khác máy build) build engine tại chỗ — cần .pt + Dockerfile.export
-docker compose -f scripts/docker-compose.export.yaml run --rm vehicle_export
-
-# 2) Pull / load image rồi start
-docker pull nhd04072004/vehicle-app:1.0.0
-docker compose up -d
-
-# Log
-docker logs -f vehicle
-```
-
-Build image từ source (khi chưa có registry):
-
-```bash
-docker compose up -d --build
-```
-
-Volumes hiện tại:
-
-```yaml
-volumes:
-  - ./resources/config:/app/resources/config
-  - ./resources/ds:/app/resources/ds
-  - ./resources/weights:/app/resources/weights
-```
 
 Đổi config / engine trên host → `docker compose restart` (không cần rebuild image, trừ khi đổi code C++).
 

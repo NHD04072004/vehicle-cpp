@@ -1,15 +1,12 @@
-#################################
-#   docker compose up -d --build
-#################################
+#####################################################
+#   PRODUCTION — docker compose up -d
+#   Image đã build sẵn bởi deploy.sh, không build từ source.
+#   Copy sang target bởi ./deploy.sh — sửa file này rồi chạy lại deploy.sh.
+#####################################################
 services:
   vehicle:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      network: host
-      # Không truyền TARGETARCH rỗng (sẽ đè BuildKit). Ghi đè khi cần:
-      #   docker compose build --build-arg TARGETARCH=arm64 --build-arg BASE_IMAGE=nhd04072004/ds_app:8.0-arm64
     image: nhd04072004/vehicle-app:1.0.0
+    pull_policy: never
     container_name: vehicle
     restart: unless-stopped
     runtime: nvidia
@@ -43,9 +40,9 @@ services:
       - MALLOC_MMAP_THRESHOLD_=131072
       - MALLOC_TRIM_THRESHOLD_=131072
       - VEHICLE_LOG_LEVEL=${VEHICLE_LOG_LEVEL:-info}
-      - VEHICLE_MEM_STATS=${VEHICLE_MEM_STATS:-0}   # 1 = log mem_stats mỗi 5s (cần log level debug)
+      - VEHICLE_MEM_STATS=${VEHICLE_MEM_STATS:-0}
       - USE_NEW_NVSTREAMMUX=yes
-      - WARP_DEBUG=${WARP_DEBUG:-0}   # 1 = dump mask/parent/fail reason (tối đa 64 dòng/process)
+      - WARP_DEBUG=${WARP_DEBUG:-0}
 
     logging:
       driver: json-file

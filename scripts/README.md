@@ -5,7 +5,7 @@ Tiện ích chuyển model và vận hành.
 | File | Tác dụng |
 |------|----------|
 | `export_onnx.py` | `.pt` → `.onnx` theo layout DeepStream `[batch, num_boxes, 6]` = `[x1, y1, x2, y2, score, class_id]`. Tự nhận checkpoint **ultralytics** (YOLOv8/YOLO11) hay **yolov5** (repo gốc). |
-| `build_engines.sh` | Chạy `export_onnx.py` cho từng model rồi build TensorRT engine bằng `trtexec`. |
+| `build_engines.sh` | `.pt`/`.onnx` → TensorRT engine (`trtexec`). Gồm YOLO detect và YOLO-Pose `last_keypoint`. |
 | `mem_watch.sh` | Đo RSS/GPU theo thời gian (mặc định 10 phút). `--restart` để restart compose rồi sample. |
 | `bench_stages.sh` | Đo FPS từng chặng pipeline (gst-launch). |
 | `vendor/yolov5/` | Repo `ultralytics/yolov5` (script tự clone khi cần) — chỉ dùng để nạp checkpoint YOLOv5. |
@@ -41,11 +41,11 @@ Model đang khai báo trong `build_engines.sh`:
 | Tên | Weights | imgsz | max batch | Engine |
 |-----|---------|-------|-----------|--------|
 | `vehicle` | `vehicle_n_best.pt` (YOLO11n) | 640 | 8 | `vehicle_b8_fp16.engine` |
+| `last_keypoint` | `last_keypoint.pt` (YOLO-Pose) | 640 | 8 | `last_keypoint_b8_fp16.engine` |
 | `digit_n_p3p4_256` | `digit_n_p3p4_256.pt` (YOLO11n) | 256 | 16 | `digit_n_p3p4_256_b16_fp16.engine` |
+| `helmet` | `helmet_ylv8_171125.pt` | 640 | 16 | `helmet_b16_fp16.engine` |
 
-SGIE1 plate pose (`last_keypoint.pt` → `last_keypoint.onnx` /
-`last_keypoint_b8_fp16.engine`, batch 8 khớp PGIE) export bằng
-`scripts/vendor/deepstream_yolo_pose/`, không nằm trong `MODELS` ở trên.
+SGIE1 plate pose export bằng `scripts/vendor/deepstream_yolo_pose/export_yoloV8_pose.py`.
 
 Engine phụ thuộc GPU + phiên bản TensorRT của máy chạy → **không commit, không đóng
 vào image**; build lại trên máy đích rồi mount `resources/` (xem

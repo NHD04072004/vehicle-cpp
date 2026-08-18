@@ -32,6 +32,18 @@ do_run() {
   export VEHICLE_ROOT="${VEHICLE_ROOT:-$ROOT}"
   export USE_NEW_NVSTREAMMUX="${USE_NEW_NVSTREAMMUX:-yes}"
 
+  if [[ -z "${LD_PRELOAD:-}" ]]; then
+    case "$(uname -m)" in
+      aarch64|arm64) _tcmalloc=/usr/lib/aarch64-linux-gnu/libtcmalloc.so.4 ;;
+      *)             _tcmalloc=/usr/lib/x86_64-linux-gnu/libtcmalloc.so.4 ;;
+    esac
+    if [[ -f "$_tcmalloc" ]]; then
+      export LD_PRELOAD="$_tcmalloc"
+    fi
+    unset _tcmalloc
+  fi
+
+
   local extra=()
   if [[ -n "${VEHICLE_EXTRA_ARGS:-}" ]]; then
     # shellcheck disable=SC2206

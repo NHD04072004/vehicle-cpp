@@ -7,6 +7,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.export
+      # BuildKit tự chọn amd64|arm64. Ghi đè:
+      #   docker compose -f scripts/docker-compose.export.yaml build --build-arg TARGETARCH=arm64
     image: nhd04072004/vehicle-export:1.0.0
     runtime: nvidia
 
