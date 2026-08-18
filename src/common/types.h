@@ -98,6 +98,8 @@ struct PlateEmit {
   // Vi phạm đi sai làn (zone tên *_LANE, mọi loại xe).
   int wrong_lane_frames = 0;   // số frame detect đi sai làn
   std::string wrong_lane_zone; // tên zone LANE đầu tiên gây vi phạm (evidence)
+  JpegImage wrong_lane_full;
+  JpegImage wrong_lane_crop;
   // Mốc monotonic (giây) — latency debug.
   double created_at_s = 0.0;
   double first_ocr_at_s = 0.0;

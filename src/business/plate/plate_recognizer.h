@@ -27,6 +27,7 @@ struct PendingEmit {
   int no_helmet_count = 0;
   int wrong_lane_frames = 0;
   std::string wrong_lane_zone;
+  bool has_wrong_lane_snapshot = false;
 };
 
 class PlateRecognizer {
@@ -43,6 +44,8 @@ class PlateRecognizer {
   // Ghi nhận 1 frame xe đi sai làn (zone_name: LANE zone gây vi phạm).
   void observeLane(uint64_t track_id, const std::string& zone_name);
 
+  bool everEnteredPlateZone(uint64_t track_id) const;
+
   // OCR + cập nhật mẫu snapshot theo chuỗi biển.
   PlateOcrStatus addOcrReading(uint64_t track_id, const CharSequence& chars,
                                const std::string& raw, double now_s = 0.0,
@@ -54,6 +57,8 @@ class PlateRecognizer {
 
   std::string bestSnapshotKey(uint64_t track_id) const;
   bool hasSnapshotSamples(uint64_t track_id) const;
+  bool needsWrongLaneSnapshot(uint64_t track_id) const;
+  void markWrongLaneSnapshotTaken(uint64_t track_id);
   // Đã chốt biển, chưa emit — cần (hoặc đang chờ) snapshot vehicle.
   bool awaitingSnapshot(uint64_t track_id) const;
 

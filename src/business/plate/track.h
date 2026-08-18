@@ -71,12 +71,13 @@ class TrackPlateState {
   void markPosted() { is_posted_ = true; }
   void addClass(int cls, double conf = 0.0);
 
-  // 1 lần chạy SGIE helmet trên track: no_helmet_count = số người không đội mũ
-  // trong frame đó (0 = frame sạch, không tính là hit).
   void addHelmetObservation(int no_helmet_count);
 
-  // 1 lần detect anchor xe nằm trong zone LANE sai loại xe trong frame đó.
   void addWrongLaneObservation(const std::string& zone_name);
+  bool needsWrongLaneSnapshot() const { return needs_wrong_lane_snapshot_; }
+  void markWrongLaneSnapshotTaken() { needs_wrong_lane_snapshot_ = false; }
+  bool hasWrongLaneSnapshot() const { return has_wrong_lane_snapshot_; }
+  void markHasWrongLaneSnapshot() { has_wrong_lane_snapshot_ = true; }
 
   // Class: nhiều phiếu nhất; hoà → tổng conf cao hơn. -1 nếu chưa có.
   int votedCls() const;
@@ -127,6 +128,8 @@ class TrackPlateState {
   int max_no_helmet_count_ = 0;
   int wrong_lane_frames_ = 0;
   std::string wrong_lane_zone_;
+  bool needs_wrong_lane_snapshot_ = false;  // đang chờ probe chụp ảnh vi phạm
+  bool has_wrong_lane_snapshot_ = false;    // đã có ảnh lúc sai làn
   // Chuỗi biển raw → điểm mẫu tốt nhất (phatnguoi _sample_by_plate).
   std::map<std::string, SnapshotScore> samples_by_plate_;
   std::string best_snapshot_key_;

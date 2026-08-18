@@ -171,7 +171,32 @@ bool EventPublisher::publishViolations(const Camera& camera, const PlateEmit& em
   if (canPublishWrongLane(camera, emit)) {
     Json::Value evidence(Json::objectValue);
     evidence["lane_zone"] = emit.wrong_lane_zone;
-    if (!publishOneViolation(camera, emit, vparams, business::violation::kWrongLane, evidence))
+    // WRONG_LANE dùng ảnh chụp đúng lúc vi phạm; các event khác giữ ảnh đẹp nhất.
+    business::plate::EventParams lane_params = vparams;
+    if (!emit.wrong_lane_full.empty()) {
+      const std::string base = "vehicle_" + std::to_string(emit.track_id) + "_wrong_lane";
+      if (dry_run_) {
+        lane_params.snapshot_url = "dry-run/" + base + ".jpg";
+        lane_params.snapshot_plate_key =
+            emit.wrong_lane_crop.empty() ? "" : "dry-run/" + base + "_plate.jpg";
+      } else {
+        const std::string key =
+            uploader_->upload(camera.id, "vehicle", emit.wrong_lane_full.data, base + ".jpg");
+        if (key.empty()) {
+          LOG_WARN("track %lu: upload ảnh WRONG_LANE thất bại — dùng ảnh mặc định",
+                   static_cast<unsigned long>(emit.track_id));
+        } else {
+          lane_params.snapshot_url = key;
+          lane_params.snapshot_plate_key =
+              emit.wrong_lane_crop.empty()
+                  ? ""
+                  : uploader_->upload(camera.id, "plate", emit.wrong_lane_crop.data,
+                                      base + "_plate.jpg");
+        }
+      }
+    }
+    if (!publishOneViolation(camera, emit, lane_params, business::violation::kWrongLane,
+                             evidence))
       any_failed = true;
   }
 

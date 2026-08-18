@@ -86,6 +86,7 @@ void PlateRecognizer::observeLane(uint64_t track_id, const std::string& zone_nam
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = tracks_.find(track_id);
   if (it == tracks_.end()) return;
+  if (!it->second.everEnteredPolygon()) return;
   it->second.addWrongLaneObservation(zone_name);
   LOG_DEBUG("track %lu: wrong_lane zone='%s' (frame thứ %d)",
             static_cast<unsigned long>(track_id), zone_name.c_str(),
@@ -135,6 +136,26 @@ bool PlateRecognizer::hasSnapshotSamples(uint64_t track_id) const {
   return it != tracks_.end() && it->second.hasSnapshotSamples();
 }
 
+bool PlateRecognizer::everEnteredPlateZone(uint64_t track_id) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = tracks_.find(track_id);
+  return it != tracks_.end() && it->second.everEnteredPolygon();
+}
+
+bool PlateRecognizer::needsWrongLaneSnapshot(uint64_t track_id) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = tracks_.find(track_id);
+  return it != tracks_.end() && it->second.needsWrongLaneSnapshot();
+}
+
+void PlateRecognizer::markWrongLaneSnapshotTaken(uint64_t track_id) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = tracks_.find(track_id);
+  if (it == tracks_.end()) return;
+  it->second.markWrongLaneSnapshotTaken();
+  it->second.markHasWrongLaneSnapshot();
+}
+
 bool PlateRecognizer::awaitingSnapshot(uint64_t track_id) const {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = tracks_.find(track_id);
@@ -172,7 +193,8 @@ std::vector<PendingEmit> PlateRecognizer::collectReady(double now_s) {
     ready.push_back({entry.first, plate, state.votedCls(), state.bestSnapshotKey(),
                      state.createdAtS(), state.firstOcrAtS(), state.finalAtS(),
                      state.plateRecognizeCount(), state.noHelmetFrames(),
-                     state.noHelmetCount(), state.wrongLaneFrames(), state.wrongLaneZone()});
+                     state.noHelmetCount(), state.wrongLaneFrames(), state.wrongLaneZone(),
+                     state.hasWrongLaneSnapshot()});
   }
   return ready;
 }

@@ -180,6 +180,7 @@ void TrackPlateState::addHelmetObservation(int no_helmet_count) {
 void TrackPlateState::addWrongLaneObservation(const std::string& zone_name) {
   ++wrong_lane_frames_;
   if (wrong_lane_zone_.empty()) wrong_lane_zone_ = zone_name;
+  if (!has_wrong_lane_snapshot_) needs_wrong_lane_snapshot_ = true;
 }
 
 int TrackPlateState::votedCls() const {
