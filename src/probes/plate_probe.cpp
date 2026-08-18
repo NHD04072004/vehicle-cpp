@@ -32,6 +32,7 @@ constexpr size_t kMaxCachedImages = 16;
 constexpr size_t kMaxEmitQueue = 8;
 constexpr int kJpegQuality = 80;
 constexpr double kMemStatsIntervalS = 5.0;
+constexpr const char* kPlateZoneName = "PLATE";
 
 bool memStatsEnabled() {
   static const bool enabled = [] {
@@ -186,7 +187,6 @@ void PlateProbe::bindCamera(unsigned int source_id, const Camera& camera) {
     slot->manager = std::make_unique<business::plate::PlateRecognizer>(config_.plate());
   }
   slot->camera = camera;
-  slot->warned_no_zone = false;
 }
 
 void PlateProbe::unbindCamera(unsigned int source_id) {
@@ -288,6 +288,7 @@ std::vector<std::vector<Point>> PlateProbe::polygonsFor(const std::string& camer
   std::vector<std::vector<Point>> polygons;
   polygons.reserve(set.zones.size());
   for (const Zone& zone : set.zones) {
+    if (zone.name != kPlateZoneName) continue;
     if (zone.normalized) {
       polygons.push_back(utils::scaleZone(zone.points, frame_w, frame_h));
       continue;
@@ -301,6 +302,39 @@ std::vector<std::vector<Point>> PlateProbe::polygonsFor(const std::string& camer
     polygons.push_back(std::move(scaled));
   }
   return polygons;
+}
+
+std::vector<PlateProbe::LanePolygon> PlateProbe::lanePolygonsFor(
+    const std::string& camera_code, double frame_w, double frame_h, double source_w,
+    double source_h) {
+  ZoneSet set;
+  {
+    std::lock_guard<std::mutex> lock(zones_mutex_);
+    auto it = zones_.find(camera_code);
+    if (it == zones_.end()) return {};
+    set = it->second;
+  }
+
+  std::vector<LanePolygon> lanes;
+  for (const Zone& zone : set.zones) {
+    const std::set<int> allowed = laneAllowedClasses(zone.name);
+    if (allowed.empty()) continue;  // không phải zone *_LANE hợp lệ
+
+    LanePolygon lane;
+    lane.allowed_classes = allowed;
+    lane.zone_name = zone.name;
+    if (zone.normalized) {
+      lane.polygon = utils::scaleZone(zone.points, frame_w, frame_h);
+    } else {
+      // Toạ độ pixel theo độ phân giải nguồn → quy về không gian của muxer.
+      const double sx = (source_w > 0.0) ? frame_w / source_w : 1.0;
+      const double sy = (source_h > 0.0) ? frame_h / source_h : 1.0;
+      lane.polygon.reserve(zone.points.size());
+      for (const Point& p : zone.points) lane.polygon.push_back({p.x * sx, p.y * sy});
+    }
+    lanes.push_back(std::move(lane));
+  }
+  return lanes;
 }
 
 namespace {
@@ -376,11 +410,6 @@ void setClampedRect(NvOSD_RectParams* rect, double x1, double y1, double x2, dou
   rect->height = std::max(0.0f, h);
 }
 
-// Lưu bbox xe gốc ngay trong object meta (misc_obj_info[0..3]) thay vì map phụ theo
-// GstBuffer*. Con trỏ buffer bị pool tái sử dụng nên map phụ vừa rò rỉ khi frame bị drop
-// giữa expand/restore, vừa có thể ghi vào NvDsObjectMeta đã free. State đi kèm object thì
-// tự chết theo object — không cần dọn, không cần mutex.
-// Layout: [0]=tag, [1]=left|top, [2]=width|height (float bitcast, đóng gói 2 giá trị/slot).
 constexpr gint64 kOrigRectTag = 0x5645484f524543LL;  // "VEHOREC"
 
 gint64 packFloats(float a, float b) {
@@ -524,11 +553,6 @@ GstPadProbeReturn PlateProbe::handleBbox(GstPadProbeInfo* info) {
     const double frame_h = static_cast<double>(frame->source_frame_height);
     const std::vector<std::vector<Point>> polygons =
         polygonsFor(state->camera.code, frame_w, frame_h, frame_w, frame_h);
-    if (polygons.empty() && !state->warned_no_zone) {
-      LOG_WARN("camera %s: chưa có zone ROI — tạm xử lý toàn khung hình",
-               state->camera.code.c_str());
-      state->warned_no_zone = true;
-    }
 
     std::vector<Detection> detections;
     for (NvDsMetaList* l_obj = frame->obj_meta_list; l_obj != nullptr; l_obj = l_obj->next) {
@@ -581,6 +605,7 @@ GstPadProbeReturn PlateProbe::handleMeta(GstPadProbeInfo* info) {
   const PipelineConfig& pipe = config_.pipeline();
   const ProbeConfig& probe_cfg = pipe.probe;
   const HelmetViolationConfig& helmet_cfg = config_.violation().helmet;
+  const LaneViolationConfig& wrong_lane_cfg = config_.violation().wrong_lane;
   const double now_s = probe_start_s;
 
   NvBufSurface* surface = nullptr;
@@ -605,6 +630,8 @@ GstPadProbeReturn PlateProbe::handleMeta(GstPadProbeInfo* info) {
 
     const std::vector<std::vector<Point>> polygons =
         polygonsFor(state->camera.code, frame_w, frame_h, frame_w, frame_h);
+    const std::vector<LanePolygon> lane_polygons =
+        lanePolygonsFor(state->camera.code, frame_w, frame_h, frame_w, frame_h);
 
     // Phân tầng metadata: xe (PGIE) → biển (SGIE1) → ký tự (SGIE2).
     std::vector<NvDsObjectMeta*> vehicles;
@@ -666,6 +693,18 @@ GstPadProbeReturn PlateProbe::handleMeta(GstPadProbeInfo* info) {
       }
 
       state->manager->observeVehicle(track_id, vehicle_cls, vehicle->confidence, in_zone, now_s);
+
+      // WRONG_LANE: độc lập với PLATE — cache theo track chờ có biển, mọi loại xe có zone lane.
+      if (wrong_lane_cfg.enabled) {
+        for (const LanePolygon& lane : lane_polygons) {
+          if (lane.allowed_classes.count(vehicle_cls) > 0) continue;  // đúng làn
+          if (utils::pointInPolygon(anchor, lane.polygon)) {
+            state->manager->observeLane(track_id, lane.zone_name);
+            break;
+          }
+        }
+      }
+
       if (!in_zone) continue;
 
       // NO_HELMET chỉ áp dụng cho xe máy.
@@ -726,8 +765,6 @@ GstPadProbeReturn PlateProbe::handleMeta(GstPadProbeInfo* info) {
       if (want_plate && !snap_plate_key.empty() && surface != nullptr &&
           plate_it != plate_of.end()) {
         const double enc_start_s = utils::monotonicSeconds();
-        // Ưu tiên snapshot đã perspective-warp (cùng keypoints/unletterbox preprocess).
-        // Meta probe sau restore → util tự re-expand parent ROI. Fail → AABB cũ.
         utils::PlateWarpSnapshotParams warp_params;
         warp_params.keypoint_min_confidence = probe_cfg.keypoint_min_confidence;
         warp_params.plate_expand_ratio = probe_cfg.plate_expand_ratio;
@@ -991,6 +1028,8 @@ GstPadProbeReturn PlateProbe::handleImages(GstPadProbeInfo* info) {
       job.emit.recognize_count = pending.recognize_count;
       job.emit.no_helmet_frames = pending.no_helmet_frames;
       job.emit.no_helmet_count = pending.no_helmet_count;
+      job.emit.wrong_lane_frames = pending.wrong_lane_frames;
+      job.emit.wrong_lane_zone = pending.wrong_lane_zone;
       job.emit.images_ready_at_s = now_s;
       job.emit.full_frame = std::move(full);
       job.emit.plate_crop = std::move(crop);

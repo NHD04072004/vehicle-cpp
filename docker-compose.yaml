@@ -11,6 +11,7 @@ services:
     container_name: vehicle
     restart: unless-stopped
     runtime: nvidia
+    privileged: true
 
     ulimits:
       nofile:

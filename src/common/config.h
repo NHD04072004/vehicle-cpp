@@ -101,8 +101,15 @@ struct HelmetViolationConfig {
   int min_hits = 1;            // số frame tối thiểu detect được mới chốt vi phạm
 };
 
+// `violation.wrong_lane.*` — vi phạm đi sai làn (theo tên zone *_LANE, mọi loại xe).
+struct LaneViolationConfig {
+  bool enabled = true;
+  int min_hits = 1;  // số frame tối thiểu detect được mới chốt vi phạm
+};
+
 struct ViolationConfig {
   HelmetViolationConfig helmet;
+  LaneViolationConfig wrong_lane;
 };
 
 struct MqttConfig {

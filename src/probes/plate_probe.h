@@ -9,6 +9,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -74,7 +75,6 @@ class PlateProbe {
     Camera camera;
     std::unique_ptr<business::plate::PlateRecognizer> manager;
     std::map<uint64_t, TrackSnapshots> snapshots;
-    bool warned_no_zone = false;
   };
 
   struct EmitJob {
@@ -95,10 +95,19 @@ class PlateProbe {
   GstPadProbeReturn handleMeta(GstPadProbeInfo* info);
   GstPadProbeReturn handleImages(GstPadProbeInfo* info);
 
+  struct LanePolygon {
+    std::vector<Point> polygon;
+    std::set<int> allowed_classes;  // loại xe được phép ở làn này
+    std::string zone_name;
+  };
+
   SourceState* sourceState(unsigned int source_id);
   std::vector<std::vector<Point>> polygonsFor(const std::string& camera_code,
                                               double frame_w, double frame_h,
                                               double source_w, double source_h);
+  std::vector<LanePolygon> lanePolygonsFor(const std::string& camera_code,
+                                           double frame_w, double frame_h,
+                                           double source_w, double source_h);
   void enqueue(EmitJob job);
   void workerLoop();
   void clearPendingFor(unsigned int source_id);

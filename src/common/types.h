@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -91,6 +92,9 @@ struct PlateEmit {
   // Vi phạm không đội mũ (SGIE3, chỉ xe máy).
   int no_helmet_frames = 0;  // số frame detect được người không đội mũ
   int no_helmet_count = 0;   // số người không đội mũ nhiều nhất trong 1 frame
+  // Vi phạm đi sai làn (zone tên *_LANE, mọi loại xe).
+  int wrong_lane_frames = 0;   // số frame detect đi sai làn
+  std::string wrong_lane_zone; // tên zone LANE đầu tiên gây vi phạm (evidence)
   // Mốc monotonic (giây) — latency debug.
   double created_at_s = 0.0;
   double first_ocr_at_s = 0.0;
@@ -101,5 +105,11 @@ struct PlateEmit {
 };
 
 const char* vehicleClassName(int cls);
+
+// Parse tên zone dạng "<CLASS>_LANE" hoặc tổ hợp "<CLASS1>_<CLASS2>_LANE" (vd.
+// "CAR_LANE" → {kClassCar}, "CAR_MOTOBIKE_LANE" → {kClassCar, kClassMotorbike}).
+// Token không khớp tên class nào bị bỏ qua. Không kết thúc bằng "_LANE" hoặc không có
+// token class hợp lệ nào → trả về set rỗng (không phải zone lane).
+std::set<int> laneAllowedClasses(const std::string& zone_name);
 
 }  // namespace vehicle

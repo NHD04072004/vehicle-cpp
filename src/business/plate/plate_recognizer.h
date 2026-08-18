@@ -25,6 +25,8 @@ struct PendingEmit {
   int recognize_count = 0;
   int no_helmet_frames = 0;
   int no_helmet_count = 0;
+  int wrong_lane_frames = 0;
+  std::string wrong_lane_zone;
 };
 
 class PlateRecognizer {
@@ -37,6 +39,9 @@ class PlateRecognizer {
 
   // Kết quả SGIE helmet của 1 frame (chỉ gọi cho xe máy đang trong zone).
   void observeHelmet(uint64_t track_id, int no_helmet_count);
+
+  // Ghi nhận 1 frame xe đi sai làn (zone_name: LANE zone gây vi phạm).
+  void observeLane(uint64_t track_id, const std::string& zone_name);
 
   // OCR + cập nhật mẫu snapshot theo chuỗi biển.
   PlateOcrStatus addOcrReading(uint64_t track_id, const CharSequence& chars,

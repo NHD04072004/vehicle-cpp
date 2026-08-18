@@ -39,11 +39,10 @@ bool PlateRecognizer::observeVehicle(uint64_t track_id, int cls, double cls_conf
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = tracks_.find(track_id);
   if (it == tracks_.end()) {
-    if (!in_zone) return false;
     it = tracks_.emplace(track_id, TrackPlateState(track_id, now_s,
                                                    config_.max_recognize_times,
                                                    config_.plate_style)).first;
-    LOG_DEBUG("track %lu: vào zone, tạo state", static_cast<unsigned long>(track_id));
+    LOG_DEBUG("track %lu: xuất hiện, tạo state", static_cast<unsigned long>(track_id));
   }
 
   if (in_zone) {
@@ -57,6 +56,8 @@ bool PlateRecognizer::observeVehicle(uint64_t track_id, int cls, double cls_conf
     LOG_DEBUG("track %lu: rời zone — chờ miss %.0fs", static_cast<unsigned long>(track_id),
               kMissTrackIdleS);
   }
+
+  if (!it->second.everEnteredPolygon()) return false;
 
   const bool just_final = it->second.tryFinalizeMiss(now_s);
   if (just_final) {
@@ -78,6 +79,17 @@ void PlateRecognizer::observeHelmet(uint64_t track_id, int no_helmet_count) {
   LOG_DEBUG("track %lu: helmet %d người không đội mũ (frame thứ %d)",
             static_cast<unsigned long>(track_id), no_helmet_count,
             it->second.noHelmetFrames());
+}
+
+void PlateRecognizer::observeLane(uint64_t track_id, const std::string& zone_name) {
+  if (zone_name.empty()) return;
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = tracks_.find(track_id);
+  if (it == tracks_.end()) return;
+  it->second.addWrongLaneObservation(zone_name);
+  LOG_DEBUG("track %lu: wrong_lane zone='%s' (frame thứ %d)",
+            static_cast<unsigned long>(track_id), zone_name.c_str(),
+            it->second.wrongLaneFrames());
 }
 
 PlateOcrStatus PlateRecognizer::addOcrReading(uint64_t track_id, const CharSequence& chars,
@@ -160,7 +172,7 @@ std::vector<PendingEmit> PlateRecognizer::collectReady(double now_s) {
     ready.push_back({entry.first, plate, state.votedCls(), state.bestSnapshotKey(),
                      state.createdAtS(), state.firstOcrAtS(), state.finalAtS(),
                      state.plateRecognizeCount(), state.noHelmetFrames(),
-                     state.noHelmetCount()});
+                     state.noHelmetCount(), state.wrongLaneFrames(), state.wrongLaneZone()});
   }
   return ready;
 }

@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -19,6 +20,8 @@ namespace {
 constexpr const char* kDefaultProtoLib =
     "/opt/nvidia/deepstream/deepstream/lib/libnvds_mqtt_proto.so";
 
+constexpr unsigned long kMaxReconnectAttempts = 20000;
+
 // Con trỏ hàm của adapter (nạp bằng dlsym như sample DeepStream).
 NvDsMsgApiHandle (*g_connect)(char*, nvds_msgapi_connect_cb_t, char*) = nullptr;
 NvDsMsgApiErrorType (*g_send_async)(NvDsMsgApiHandle, char*, const uint8_t*, size_t,
@@ -31,8 +34,10 @@ void (*g_do_work)(NvDsMsgApiHandle) = nullptr;
 // nvds_msgapi connect callback không có user_data.
 MqttClient* g_mqtt_self = nullptr;
 
-void connectCallback(NvDsMsgApiHandle /*handle*/, NvDsMsgApiEventType event) {
-  if (g_mqtt_self != nullptr) g_mqtt_self->onBrokerEvent(static_cast<int>(event));
+void requestProcessRestart() { ::kill(::getpid(), SIGTERM); }
+
+void connectCallback(NvDsMsgApiHandle handle, NvDsMsgApiEventType event) {
+  if (g_mqtt_self != nullptr) g_mqtt_self->onBrokerEvent(handle, static_cast<int>(event));
 }
 
 void sendCallback(void* /*user_ptr*/, NvDsMsgApiErrorType flag) {
@@ -104,12 +109,20 @@ bool MqttClient::openSession() {
   if (handle_ != nullptr) return true;
   if (config_path_.empty()) config_path_ = writeBrokerConfig(config_);
   std::string connection = config_.host + ";" + std::to_string(config_.port);
+
+  live_handle_.store(nullptr);
   handle_ = g_connect(const_cast<char*>(connection.c_str()), connectCallback,
                       config_path_.empty() ? nullptr : const_cast<char*>(config_path_.c_str()));
   if (handle_ == nullptr) {
-    LOG_ERROR("mqtt: connect %s thất bại", connection.c_str());
+    const unsigned long n = retry_count_.fetch_add(1) + 1;
+    // Outage dài (giờ/ngày) → log thưa dần: 10 lần đầu, rồi mỗi 60 lần (~5 phút @5s).
+    if (n <= 10 || n % 60 == 0)
+      LOG_ERROR("mqtt: connect %s thất bại (lần %lu)", connection.c_str(), n);
     return false;
   }
+  live_handle_.store(handle_);
+  retry_count_.store(0);
+  need_reconnect_.store(false);
   LOG_INFO("mqtt: connect %s (user=%s)", connection.c_str(), config_.username.c_str());
   return true;
 }
@@ -133,13 +146,17 @@ void MqttClient::notifyConnection(bool ok) {
   if (cb) cb(ok);
 }
 
-void MqttClient::onBrokerEvent(int event) {
+void MqttClient::onBrokerEvent(void* handle, int event) {
   if (shutting_down_.load()) return;
+
+  void* live = live_handle_.load();
+  if (live == nullptr || (handle != nullptr && handle != live)) return;
+
   if (event == static_cast<int>(NVDS_MSGAPI_EVT_SUCCESS)) {
     connected_.store(true);
     return;
   }
-  LOG_ERROR("mqtt: broker event=%d — sẽ reconnect", event);
+  if (connected_.load()) LOG_ERROR("mqtt: broker event=%d — sẽ reconnect", event);
   setConnected(false);
   need_reconnect_.store(true);
   cv_.notify_all();
@@ -184,18 +201,16 @@ void MqttClient::workerLoop() {
 
     if (shutting_down_.load() || !running_.load()) break;
 
-    // Mất kết nối hoặc chưa có handle — đóng session cũ rồi thử lại.
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (handle_ != nullptr) {
-        if (g_disconnect != nullptr) g_disconnect(handle_);
-        handle_ = nullptr;
-      }
+      handle_ = nullptr;
+      live_handle_.store(nullptr);
     }
     if (connected_.load()) setConnected(false);
 
     const int interval_s = std::max(1, config_.reconnect_interval_s);
-    LOG_WARN("mqtt: reconnect sau %ds...", interval_s);
+    const unsigned long n = retry_count_.load();
+    if (n <= 10 || n % 60 == 0) LOG_WARN("mqtt: reconnect sau %ds...", interval_s);
     {
       std::unique_lock<std::mutex> lock(mutex_);
       cv_.wait_for(lock, std::chrono::seconds(interval_s),
@@ -203,6 +218,7 @@ void MqttClient::workerLoop() {
     }
     if (!running_.load() || shutting_down_.load()) break;
 
+    const unsigned long failures = retry_count_.load() + 1;  // openSession() sẽ reset về 0
     bool ok = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -212,10 +228,19 @@ void MqttClient::workerLoop() {
         resubscribe();
       }
     }
-    if (ok)
+    if (ok) {
+      LOG_INFO("mqtt: reconnect thành công sau %lu lần thử", failures);
       setConnected(true);  // sau re-subscribe, ngoài mutex_
-    else
-      LOG_WARN("mqtt: reconnect thất bại — sẽ thử lại");
+      continue;
+    }
+
+    if (retry_count_.load() >= kMaxReconnectAttempts) {
+      LOG_ERROR(
+          "mqtt: reconnect thất bại %lu lần liên tiếp — thoát để restart tiến trình sạch",
+          retry_count_.load());
+      requestProcessRestart();
+      break;
+    }
   }
 }
 
@@ -228,6 +253,7 @@ void MqttClient::disconnect() {
 
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    live_handle_.store(nullptr);
     if (handle_ != nullptr && g_disconnect != nullptr) {
       g_disconnect(handle_);
       handle_ = nullptr;

@@ -308,8 +308,6 @@ void VmsClient::handleViolations(const std::string& camera_id, const std::string
     if (item.isString()) allowed.push_back(item.asString());
 
   violations_->updateFromMqtt(camera_id, module_enabled, allowed);
-  LOG_INFO("violations[%s]: enabled=%d, %zu mã được bật", camera_id.c_str(),
-           module_enabled ? 1 : 0, allowed.size());
 }
 
 std::vector<Camera> VmsClient::cameras() const {

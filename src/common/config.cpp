@@ -137,6 +137,11 @@ void loadViolation(const YAML::Node& node, ViolationConfig* v) {
       get<int>(helmet, "no_helmet_class_id", v->helmet.no_helmet_class_id);
   v->helmet.min_hits = get<int>(helmet, "min_hits", v->helmet.min_hits);
   if (v->helmet.min_hits < 1) v->helmet.min_hits = 1;
+
+  const YAML::Node wrong_lane = node["wrong_lane"];
+  v->wrong_lane.enabled = get<bool>(wrong_lane, "enabled", v->wrong_lane.enabled);
+  v->wrong_lane.min_hits = get<int>(wrong_lane, "min_hits", v->wrong_lane.min_hits);
+  if (v->wrong_lane.min_hits < 1) v->wrong_lane.min_hits = 1;
 }
 
 }  // namespace

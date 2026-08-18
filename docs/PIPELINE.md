@@ -126,6 +126,11 @@ Probe đọc `NvDsBatchMeta` sau tracker / SGIE, đẩy sang `business` và (tu�
 - Chỉ xử lý OCR khi anchor nằm trong zone `PLATE` (từ MQTT `get_polygon`).
 - Cache polygon theo `(W, H, version)`; invalidate khi VMS cập nhật zone.
 - Bỏ qua lines IN/OUT nếu payload zones vẫn gửi kèm.
+- Zone tên `<CLASS>_LANE` hoặc tổ hợp `<CLASS1>_<CLASS2>_LANE` (vd. `CAR_LANE`,
+  `MOTOBIKE_LANE`, `CAR_MOTOBIKE_LANE`) — độc lập với `PLATE`, dùng riêng cho vi phạm
+  `WRONG_LANE` (§6.4). `<CLASS>` khớp `vehicleClassName()` viết hoa (`CAR`, `MOTOBIKE`,
+  `TRUCK`, `BUS`); tên không kết thúc bằng `_LANE` hoặc không có token loại xe hợp lệ bị
+  bỏ qua (`laneAllowedClasses()`, `src/common/types.cpp`).
 
 ### 4.2 SGIE1 — biển trên ROI xe
 
@@ -290,7 +295,7 @@ Config: `resources/config/restful.yaml` → `snapshot_api`
 
 Map class sau vote: `1→Ô tô`, `2→Xe máy`, `3→Xe tải`, `0→Xe khách`.
 
-### 6.4 Event vi phạm (NO_HELMET)
+### 6.4 Event vi phạm (NO_HELMET, WRONG_LANE)
 
 VMS gửi **retained** danh sách mã vi phạm được bật cho từng camera qua
 `get_violations` = `smart_vms/ai_config/state/{camera_id}/{ai_modules}/violations`
@@ -299,7 +304,7 @@ VMS gửi **retained** danh sách mã vi phạm được bật cho từng camera
 ```json
 {"schema_version": 1, "camera_id": "<uuid>", "camera_code": "vanninh",
  "module_code": "PLATE", "module_enabled": true,
- "allowed_codes": ["NO_HELMET", "RED_LIGHT", "…"], "revision": 0}
+ "allowed_codes": ["NO_HELMET", "WRONG_LANE", "RED_LIGHT", "…"], "revision": 0}
 ```
 
 `VmsClient` subscribe wildcard `+` cho `{camera_id}` và nạp vào
@@ -307,9 +312,13 @@ VMS gửi **retained** danh sách mã vi phạm được bật cho từng camera
 `module_enabled = true` **và** mã nằm trong `allowed_codes` của camera đó.
 
 Khi một track xe máy có ≥ `violation.helmet.min_hits` frame detect được người không
-đội mũ **và** camera bật `NO_HELMET`, app **chỉ** bắn event vi phạm trên `pub_event`
-(không gửi kèm event xe — khớp `phatnguoi_mbf` VehicleEventPublisher). Không có vi
-phạm thì chỉ bắn event xe thường. Schema khớp
+đội mũ **và** camera bật `NO_HELMET`, hoặc track có ≥ `violation.wrong_lane.min_hits`
+frame detect được anchor nằm trong zone `*_LANE` không cho phép loại xe của nó (§4.1)
+**và** camera bật `WRONG_LANE`, app **chỉ** bắn (các) event vi phạm trên `pub_event`
+(không gửi kèm event xe — khớp `phatnguoi_mbf` VehicleEventPublisher). Nếu track vi
+phạm cả 2 mã cùng lúc, app bắn **2 message MQTT độc lập**, mỗi message 1
+`violation_type_code` (wire schema không hỗ trợ nhiều mã/1 event). Không có vi phạm
+nào thì chỉ bắn event xe thường. Schema khớp
 `tests/test_proto/test_pub_mqtt_violation.py`:
 
 ```json
@@ -321,9 +330,24 @@ phạm thì chỉ bắn event xe thường. Schema khớp
 }
 ```
 
-Điều kiện bắn (khớp `phatnguoi_mbf/gsan/controller/thread/vehicle/general_thread.py`):
+`WRONG_LANE` dùng cùng shape, khác `violation_evidence`:
+```json
+"violation_evidence": { "lane_zone": "CAR_LANE" }
+```
+
+Điều kiện bắn NO_HELMET (khớp
+`phatnguoi_mbf/gsan/controller/thread/vehicle/general_thread.py`):
 `violation.helmet.enabled` **và** class sau vote = `Xe máy` **và** đủ `min_hits`
 **và** camera bật `NO_HELMET`.
+
+Điều kiện bắn WRONG_LANE: `violation.wrong_lane.enabled` **và** đủ `min_hits` **và**
+camera bật `WRONG_LANE`. Không giới hạn theo class — mọi loại xe có zone `*_LANE`
+tương ứng đều có thể vi phạm. Việc detect anchor-trong-lane-sai chạy độc lập với zone
+`PLATE` (không cần xe đã vào `PLATE` mới bắt đầu tích luỹ) — track được tạo ngay khi
+xe xuất hiện lần đầu qua PGIE (`PlateRecognizer::observeVehicle`), nên vi phạm phát
+sinh trước hoặc sau khi biển số chốt vẫn được gộp vào cùng 1 track, miễn track đó
+cuối cùng có OCR reading để chốt biển và emit (giới hạn: xe không bao giờ vào `PLATE`
+thì không emit được, giống hệt giới hạn hiện có của `NO_HELMET`).
 
 ---
 
@@ -332,7 +356,7 @@ phạm thì chỉ bắn event xe thường. Schema khớp
 File runtime (ARCHITECTURE) — chỉ `resources/config/`:
 
 - `config.yaml` — `AI_MODULE`, `plate.*`
-- `violations.yaml` — `violation.*` (helmet)
+- `violations.yaml` — `violation.*` (helmet, wrong_lane)
 - `mqtt.yaml` — broker + topic keys trên
 - `restful.yaml` — `snapshot_api.base_url` / `endpoint`
 

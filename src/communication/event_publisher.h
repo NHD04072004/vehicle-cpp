@@ -29,9 +29,15 @@ class EventPublisher {
 
  private:
   bool canPublishNoHelmet(const Camera& camera, const PlateEmit& emit) const;
+  bool canPublishWrongLane(const Camera& camera, const PlateEmit& emit) const;
 
   bool publishViolations(const Camera& camera, const PlateEmit& emit,
                          const business::plate::EventParams& params);
+
+  bool publishOneViolation(const Camera& camera, const PlateEmit& emit,
+                           const business::plate::EventParams& params,
+                           const std::string& violation_type_code,
+                           const Json::Value& evidence);
 
   const Config& config_;
   MqttClient* mqtt_;

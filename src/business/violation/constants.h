@@ -6,6 +6,7 @@ namespace business {
 namespace violation {
 
 constexpr const char* kNoHelmet = "NO_HELMET";
+constexpr const char* kWrongLane = "WRONG_LANE";
 
 }  // namespace violation
 }  // namespace business

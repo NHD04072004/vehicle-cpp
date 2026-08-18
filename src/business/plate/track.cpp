@@ -27,6 +27,7 @@ TrackPlateState::TrackPlateState(uint64_t track_id, double created_at_s,
 
 void TrackPlateState::onEnterPolygon(double now_s) {
   in_polygon_ = true;
+  ever_entered_polygon_ = true;
   last_in_zone_at_s_ = now_s;
 }
 
@@ -174,6 +175,11 @@ void TrackPlateState::addHelmetObservation(int no_helmet_count) {
   if (no_helmet_count <= 0) return;
   ++no_helmet_frames_;
   if (no_helmet_count > max_no_helmet_count_) max_no_helmet_count_ = no_helmet_count;
+}
+
+void TrackPlateState::addWrongLaneObservation(const std::string& zone_name) {
+  ++wrong_lane_frames_;
+  if (wrong_lane_zone_.empty()) wrong_lane_zone_ = zone_name;
 }
 
 int TrackPlateState::votedCls() const {

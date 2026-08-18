@@ -60,7 +60,7 @@ bool EventPublisher::publishPlateEvent(const Camera& camera, const PlateEmit& em
   params.event_time = utils::utcIso8601();
   params.ai_modules = config_.aiModule();
 
-  if (canPublishNoHelmet(camera, emit)) {
+  if (canPublishNoHelmet(camera, emit) || canPublishWrongLane(camera, emit)) {
     if (!publishViolations(camera, emit, params)) return false;
   } else {
     const Json::Value event = business::plate::buildVehicleEvent(params);
@@ -117,18 +117,27 @@ bool EventPublisher::canPublishNoHelmet(const Camera& camera, const PlateEmit& e
   return true;
 }
 
-bool EventPublisher::publishViolations(const Camera& camera, const PlateEmit& emit,
-                                       const business::plate::EventParams& params) {
-  if (!canPublishNoHelmet(camera, emit)) return false;
+bool EventPublisher::canPublishWrongLane(const Camera& camera, const PlateEmit& emit) const {
+  const LaneViolationConfig& wrong_lane = config_.violation().wrong_lane;
+  if (!wrong_lane.enabled) return false;
+  if (emit.wrong_lane_frames < wrong_lane.min_hits) return false;
 
-  business::plate::EventParams vparams = params;
-  if (vparams.direction.empty()) vparams.direction = "IN";
+  if (violations_ == nullptr ||
+      !violations_->allows(business::violation::kWrongLane, camera.id)) {
+    LOG_DEBUG("track %lu: WRONG_LANE (%d frame) nhưng camera %s chưa bật mã này — bỏ qua",
+              static_cast<unsigned long>(emit.track_id), emit.wrong_lane_frames,
+              camera.code.c_str());
+    return false;
+  }
+  return true;
+}
 
-  Json::Value evidence(Json::objectValue);
-  evidence["road_type"] = "highway";
-
-  const Json::Value event = business::plate::buildViolationEvent(
-      vparams, business::violation::kNoHelmet, evidence);
+bool EventPublisher::publishOneViolation(const Camera& camera, const PlateEmit& emit,
+                                         const business::plate::EventParams& params,
+                                         const std::string& violation_type_code,
+                                         const Json::Value& evidence) {
+  const Json::Value event =
+      business::plate::buildViolationEvent(params, violation_type_code, evidence);
   const std::string topic = config_.eventTopic();
   const std::string json = business::plate::toCompactJson(event);
   if (dry_run_) {
@@ -136,14 +145,37 @@ bool EventPublisher::publishViolations(const Camera& camera, const PlateEmit& em
     return true;
   }
   if (!mqtt_->publish(topic, json)) {
-    LOG_WARN("track %lu: publish NO_HELMET thất bại",
-             static_cast<unsigned long>(emit.track_id));
+    LOG_WARN("track %lu: publish %s thất bại", static_cast<unsigned long>(emit.track_id),
+             violation_type_code.c_str());
     return false;
   }
-  LOG_INFO("violation: camera=%s plate=%s code=%s (%d frame, %d người)",
-           camera.code.c_str(), emit.plate.c_str(), business::violation::kNoHelmet,
-           emit.no_helmet_frames, emit.no_helmet_count);
+  LOG_INFO("violation: camera=%s plate=%s code=%s", camera.code.c_str(), emit.plate.c_str(),
+           violation_type_code.c_str());
   return true;
+}
+
+bool EventPublisher::publishViolations(const Camera& camera, const PlateEmit& emit,
+                                       const business::plate::EventParams& params) {
+  business::plate::EventParams vparams = params;
+  if (vparams.direction.empty()) vparams.direction = "IN";
+
+  bool any_failed = false;
+
+  if (canPublishNoHelmet(camera, emit)) {
+    Json::Value evidence(Json::objectValue);
+    evidence["road_type"] = "highway";
+    if (!publishOneViolation(camera, emit, vparams, business::violation::kNoHelmet, evidence))
+      any_failed = true;
+  }
+
+  if (canPublishWrongLane(camera, emit)) {
+    Json::Value evidence(Json::objectValue);
+    evidence["lane_zone"] = emit.wrong_lane_zone;
+    if (!publishOneViolation(camera, emit, vparams, business::violation::kWrongLane, evidence))
+      any_failed = true;
+  }
+
+  return !any_failed;
 }
 
 }  // namespace comm

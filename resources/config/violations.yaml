@@ -5,3 +5,6 @@ violation:
     enabled: true
     no_helmet_class_id: 0 # class 0 của helmet model = người không đội mũ
     min_hits: 1            # số frame tối thiểu detect được mới chốt vi phạm
+  wrong_lane:              # WRONG_LANE — xe đi vào zone *_LANE không dành cho loại xe đó
+    enabled: true
+    min_hits: 1            # số frame tối thiểu detect được mới chốt vi phạm

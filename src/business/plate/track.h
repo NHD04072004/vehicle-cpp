@@ -75,6 +75,9 @@ class TrackPlateState {
   // trong frame đó (0 = frame sạch, không tính là hit).
   void addHelmetObservation(int no_helmet_count);
 
+  // 1 lần detect anchor xe nằm trong zone LANE sai loại xe trong frame đó.
+  void addWrongLaneObservation(const std::string& zone_name);
+
   // Class: nhiều phiếu nhất; hoà → tổng conf cao hơn. -1 nếu chưa có.
   int votedCls() const;
 
@@ -85,6 +88,7 @@ class TrackPlateState {
   bool isPushed() const { return is_pushed_; }
   bool isPosted() const { return is_posted_; }
   bool inPolygon() const { return in_polygon_; }
+  bool everEnteredPolygon() const { return ever_entered_polygon_; }
   bool hasSnapshotSamples() const { return !samples_by_plate_.empty(); }
   // Key ảnh sau chốt (chuỗi biển của mẫu được chọn). Rỗng nếu chưa chốt / chưa có mẫu.
   const std::string& bestSnapshotKey() const { return best_snapshot_key_; }
@@ -93,6 +97,8 @@ class TrackPlateState {
   double finalAtS() const { return final_at_s_; }
   int noHelmetFrames() const { return no_helmet_frames_; }
   int noHelmetCount() const { return max_no_helmet_count_; }
+  int wrongLaneFrames() const { return wrong_lane_frames_; }
+  const std::string& wrongLaneZone() const { return wrong_lane_zone_; }
 
  private:
   bool finalizePlate(double now_s);
@@ -108,6 +114,7 @@ class TrackPlateState {
   double max_sample_area_ = 0.0;
   double last_sample_area_ = 0.0;
   bool in_polygon_ = false;
+  bool ever_entered_polygon_ = false;
   int plate_recognize_count_ = 0;
   std::vector<CharSequence> list_plate_chars_;
   std::vector<std::string> list_plate_number_;
@@ -118,6 +125,8 @@ class TrackPlateState {
   std::vector<std::pair<int, double>> list_cls_;  // (cls, conf)
   int no_helmet_frames_ = 0;
   int max_no_helmet_count_ = 0;
+  int wrong_lane_frames_ = 0;
+  std::string wrong_lane_zone_;
   // Chuỗi biển raw → điểm mẫu tốt nhất (phatnguoi _sample_by_plate).
   std::map<std::string, SnapshotScore> samples_by_plate_;
   std::string best_snapshot_key_;

@@ -4,10 +4,31 @@ import paho.mqtt.client as mqtt
 
 from test_sub_mqtt_cameras import load_config, subscribe_camera_list
 
+ZONE_NAME = "PLATE"
+
 
 def build_polygon_topic(config, camera_code):
     # TOPIC_CAMERA_ZONES: smart_vms/cameras/+/zones
     return config["TOPIC_CAMERA_ZONES"].replace("+", str(camera_code))
+
+
+def find_zones_array(payload):
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("zones", "data", "polygons"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+    return []
+
+
+def filter_zones_by_name(payload, zone_name=ZONE_NAME):
+    zones = find_zones_array(payload)
+    return [
+        z for z in zones
+        if isinstance(z, dict) and (z.get("name") or z.get("zone_name")) == zone_name
+    ]
 
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
@@ -26,11 +47,18 @@ def on_message(client, userdata, msg):
         print("Raw payload:", msg.payload)
         return
 
-    userdata["result"].append(payload)
-    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    zone_name = userdata["zone_name"]
+    matched = filter_zones_by_name(payload, zone_name)
+    if not matched:
+        print(f"No zone named '{zone_name}' in this payload, skipped.")
+        return
+
+    userdata["result"].append(matched)
+    print(f"Matched zones (name={zone_name}):")
+    print(json.dumps(matched, indent=2, ensure_ascii=False))
 
 
-def subscribe_polygon(config, camera_code, timeout=10):
+def subscribe_polygon(config, camera_code, timeout=10, zone_name=ZONE_NAME):
     topic = build_polygon_topic(config, camera_code)
     result = []
 
@@ -40,6 +68,7 @@ def subscribe_polygon(config, camera_code, timeout=10):
             "topic": topic,
             "qos": config["QOS_COMMANDS"],
             "result": result,
+            "zone_name": zone_name,
         },
     )
     client.username_pw_set(config["MQTT_USERNAME"], config["MQTT_PASSWORD"])
@@ -60,10 +89,12 @@ def subscribe_polygon(config, camera_code, timeout=10):
     return result
 
 
-def pick_camera_with_zones(config, cameras, timeout=5):
-    """Ưu tiên camera có zones/lines trên MQTT (vd. camcaotoc), không lấy cam trống."""
+def pick_camera_with_zones(config, cameras, timeout=5, zone_name=ZONE_NAME):
+    """Ưu tiên camera có zone tên `zone_name` trên MQTT (vd. camcaotoc), không lấy cam trống."""
     for camera in cameras:
-        payloads = subscribe_polygon(config, camera["code"], timeout=timeout)
+        payloads = subscribe_polygon(
+            config, camera["code"], timeout=timeout, zone_name=zone_name
+        )
         if payloads:
             return camera, payloads
     return None, []
@@ -76,9 +107,9 @@ if __name__ == "__main__":
     if not cameras:
         raise SystemExit("No camera found for ai_modules=" + cfg["AI_MODULE"])
 
-    camera, payloads = pick_camera_with_zones(cfg, cameras)
+    camera, payloads = pick_camera_with_zones(cfg, cameras, zone_name=ZONE_NAME)
     if not camera:
         raise SystemExit(
-            "No zone/line payload for any camera with ai_modules=" + cfg["AI_MODULE"]
+            f"No zone named '{ZONE_NAME}' for any camera with ai_modules=" + cfg["AI_MODULE"]
         )
-    print(f"Using camera {camera['code']} ({len(payloads)} polygon message(s))")
+    print(f"Using camera {camera['code']} ({len(payloads)} zone='{ZONE_NAME}' message(s))")

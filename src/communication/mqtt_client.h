@@ -38,7 +38,7 @@ class MqttClient {
 
   // Dùng nội bộ bởi callback C của adapter.
   void dispatchMessage(const std::string& topic, const std::string& payload);
-  void onBrokerEvent(int event);
+  void onBrokerEvent(void* handle, int event);
 
  private:
   bool loadAdapter();
@@ -52,6 +52,7 @@ class MqttClient {
 
   void* so_handle_ = nullptr;
   void* handle_ = nullptr;  // NvDsMsgApiHandle
+  std::atomic<void*> live_handle_{nullptr};
   std::string config_path_;
   MqttConfig config_;
   std::thread worker_;
@@ -59,6 +60,7 @@ class MqttClient {
   std::atomic<bool> shutting_down_{false};
   std::atomic<bool> connected_{false};
   std::atomic<bool> need_reconnect_{false};
+  std::atomic<unsigned long> retry_count_{0};
 
   mutable std::mutex mutex_;
   std::condition_variable cv_;
