@@ -101,13 +101,20 @@ class PlateProbe {
     std::string zone_name;
   };
 
+  // Kết quả tra polygon PLATE: phân biệt "chưa có ROI" với "có ROI nhưng rỗng".
+  struct PlateZones {
+    std::vector<std::vector<Point>> polygons;
+    bool configured = false;
+  };
+
   SourceState* sourceState(unsigned int source_id);
-  std::vector<std::vector<Point>> polygonsFor(const std::string& camera_code,
-                                              double frame_w, double frame_h,
-                                              double source_w, double source_h);
+  PlateZones plateZonesFor(const std::string& camera_code, double frame_w, double frame_h,
+                           double source_w, double source_h);
   std::vector<LanePolygon> lanePolygonsFor(const std::string& camera_code,
                                            double frame_w, double frame_h,
                                            double source_w, double source_h);
+  // Cảnh báo 1 lần/version khi ZoneSet không chứa zone PLATE nào.
+  void warnMissingPlateZone(const std::string& camera_code, const ZoneSet& set);
   void enqueue(EmitJob job);
   void workerLoop();
   void clearPendingFor(unsigned int source_id);
@@ -121,6 +128,8 @@ class PlateProbe {
 
   std::mutex zones_mutex_;
   std::map<std::string, ZoneSet> zones_;
+  // camera_code → version đã cảnh báo thiếu zone PLATE (bảo vệ bởi zones_mutex_).
+  std::map<std::string, uint64_t> warned_zone_version_;
 
   std::mutex pending_mutex_;
   std::map<std::pair<unsigned int, uint64_t>, std::vector<PendingEncode>> pending_frames_;

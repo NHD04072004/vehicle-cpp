@@ -256,6 +256,7 @@ void VmsClient::handleZones(const std::string& camera_code, const std::string& p
     if (points_node == nullptr) continue;
     Zone zone;
     zone.name = asString(node, "name", asString(node, "zone_name"));
+    zone.ai_modules = aiModulesOf(node);
     zone.points = parsePoints(*points_node);
     if (zone.points.size() < 3) continue;
     for (const Point& p : zone.points)

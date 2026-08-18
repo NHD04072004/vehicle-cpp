@@ -2,6 +2,8 @@
 
 #include <sstream>
 
+#include "utils/string_utils.h"
+
 namespace vehicle {
 namespace {
 
@@ -15,6 +17,13 @@ int classFromToken(const std::string& token) {
 }
 
 }  // namespace
+
+bool Zone::hasAiModule(const std::string& module) const {
+  const std::string want = utils::toUpper(utils::trim(module));
+  for (const std::string& item : ai_modules)
+    if (utils::toUpper(utils::trim(item)) == want) return true;
+  return false;
+}
 
 const char* vehicleClassName(int cls) {
   switch (cls) {

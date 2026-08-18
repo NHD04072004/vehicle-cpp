@@ -35,9 +35,12 @@ struct BoundingBox {
 // Vùng ROI nhận từ MQTT `get_polygon` (chỉ zones, bỏ lines).
 struct Zone {
   std::string name;
+  std::vector<std::string> ai_modules;
   std::vector<Point> points;
   // true → points là 0..1 (probe scale sang pixel); false → đã là pixel.
   bool normalized = true;
+
+  bool hasAiModule(const std::string& module) const;
 };
 
 struct ZoneSet {
@@ -106,10 +109,6 @@ struct PlateEmit {
 
 const char* vehicleClassName(int cls);
 
-// Parse tên zone dạng "<CLASS>_LANE" hoặc tổ hợp "<CLASS1>_<CLASS2>_LANE" (vd.
-// "CAR_LANE" → {kClassCar}, "CAR_MOTOBIKE_LANE" → {kClassCar, kClassMotorbike}).
-// Token không khớp tên class nào bị bỏ qua. Không kết thúc bằng "_LANE" hoặc không có
-// token class hợp lệ nào → trả về set rỗng (không phải zone lane).
 std::set<int> laneAllowedClasses(const std::string& zone_name);
 
 }  // namespace vehicle

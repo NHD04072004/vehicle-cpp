@@ -34,6 +34,12 @@ constexpr int kJpegQuality = 80;
 constexpr double kMemStatsIntervalS = 5.0;
 constexpr const char* kPlateZoneName = "PLATE";
 
+bool isPlateZone(const Zone& zone) {
+  if (!laneAllowedClasses(zone.name).empty()) return false;
+  if (zone.hasAiModule(kPlateZoneName)) return true;
+  return utils::toUpper(utils::trim(zone.name)) == kPlateZoneName;
+}
+
 bool memStatsEnabled() {
   static const bool enabled = [] {
     const char* v = std::getenv("VEHICLE_MEM_STATS");
@@ -274,23 +280,24 @@ PlateProbe::SourceState* PlateProbe::sourceState(unsigned int source_id) {
   return it->second.get();
 }
 
-std::vector<std::vector<Point>> PlateProbe::polygonsFor(const std::string& camera_code,
-                                                        double frame_w, double frame_h,
-                                                        double source_w, double source_h) {
+PlateProbe::PlateZones PlateProbe::plateZonesFor(const std::string& camera_code, double frame_w,
+                                                 double frame_h, double source_w,
+                                                 double source_h) {
+  PlateZones out;
   ZoneSet set;
   {
     std::lock_guard<std::mutex> lock(zones_mutex_);
     auto it = zones_.find(camera_code);
-    if (it == zones_.end()) return {};
+    if (it == zones_.end()) return out;  // configured=false → chưa nhận ROI từ VMS
     set = it->second;
   }
+  out.configured = true;
 
-  std::vector<std::vector<Point>> polygons;
-  polygons.reserve(set.zones.size());
+  out.polygons.reserve(set.zones.size());
   for (const Zone& zone : set.zones) {
-    if (zone.name != kPlateZoneName) continue;
+    if (!isPlateZone(zone)) continue;
     if (zone.normalized) {
-      polygons.push_back(utils::scaleZone(zone.points, frame_w, frame_h));
+      out.polygons.push_back(utils::scaleZone(zone.points, frame_w, frame_h));
       continue;
     }
     // Toạ độ pixel theo độ phân giải nguồn → quy về không gian của muxer.
@@ -299,9 +306,42 @@ std::vector<std::vector<Point>> PlateProbe::polygonsFor(const std::string& camer
     std::vector<Point> scaled;
     scaled.reserve(zone.points.size());
     for (const Point& p : zone.points) scaled.push_back({p.x * sx, p.y * sy});
-    polygons.push_back(std::move(scaled));
+    out.polygons.push_back(std::move(scaled));
   }
-  return polygons;
+
+  if (out.polygons.empty()) warnMissingPlateZone(camera_code, set);
+  return out;
+}
+
+void PlateProbe::warnMissingPlateZone(const std::string& camera_code, const ZoneSet& set) {
+  {
+    // Mỗi camera chỉ cảnh báo lại khi ZoneSet đổi version — tránh spam mỗi frame.
+    std::lock_guard<std::mutex> lock(zones_mutex_);
+    auto it = warned_zone_version_.find(camera_code);
+    if (it != warned_zone_version_.end() && it->second == set.version) return;
+    warned_zone_version_[camera_code] = set.version;
+  }
+
+  std::string names;
+  for (const Zone& zone : set.zones) {
+    if (!names.empty()) names += ", ";
+    names += zone.name.empty() ? "<trống>" : ("'" + zone.name + "'");
+    names += "(ai_modules=";
+    if (zone.ai_modules.empty()) {
+      names += "<trống>";
+    } else {
+      for (size_t i = 0; i < zone.ai_modules.size(); ++i) {
+        if (i > 0) names += "|";
+        names += zone.ai_modules[i];
+      }
+    }
+    names += ")";
+  }
+  if (names.empty()) names = "<không có zone nào>";
+  LOG_WARN(
+      "zones[%s]: có %zu polygon nhưng không zone nào thuộc module '%s' (đã nhận: %s) — "
+      "tắt nhận diện biển/vi phạm cho camera này, chỉ giữ bbox tracking",
+      camera_code.c_str(), set.zones.size(), kPlateZoneName, names.c_str());
 }
 
 std::vector<PlateProbe::LanePolygon> PlateProbe::lanePolygonsFor(
@@ -551,8 +591,12 @@ GstPadProbeReturn PlateProbe::handleBbox(GstPadProbeInfo* info) {
 
     const double frame_w = static_cast<double>(frame->source_frame_width);
     const double frame_h = static_cast<double>(frame->source_frame_height);
-    const std::vector<std::vector<Point>> polygons =
-        polygonsFor(state->camera.code, frame_w, frame_h, frame_w, frame_h);
+    const PlateZones plate_zones =
+        plateZonesFor(state->camera.code, frame_w, frame_h, frame_w, frame_h);
+    const std::vector<std::vector<Point>>& polygons = plate_zones.polygons;
+    // Chưa có polygon PLATE → vẫn vẽ bbox tracking, nhưng không xe nào được coi
+    // là trong zone (không OCR, không event).
+    const bool zone_ready = !polygons.empty();
 
     std::vector<Detection> detections;
     for (NvDsMetaList* l_obj = frame->obj_meta_list; l_obj != nullptr; l_obj = l_obj->next) {
@@ -567,7 +611,7 @@ GstPadProbeReturn PlateProbe::handleBbox(GstPadProbeInfo* info) {
 
       const int vehicle_cls = obj->class_id;
       const Point anchor = utils::anchorPoint(box, probe_cfg.anchor_bottom_ratio);
-      bool in_zone = polygons.empty();
+      bool in_zone = false;
       for (const std::vector<Point>& polygon : polygons) {
         if (utils::pointInPolygon(anchor, polygon)) {
           in_zone = true;
@@ -576,8 +620,10 @@ GstPadProbeReturn PlateProbe::handleBbox(GstPadProbeInfo* info) {
       }
 
       // Tạo/cập nhật track sớm (trước SGIE) — OCR vẫn chạy ở probe meta.
-      state->manager->observeVehicle(track_id, vehicle_cls, obj->confidence, in_zone, now_s);
-      if (!in_zone) continue;
+      if (zone_ready) {
+        state->manager->observeVehicle(track_id, vehicle_cls, obj->confidence, in_zone, now_s);
+        if (!in_zone) continue;
+      }
 
       Detection det;
       det.id = "vehicle_" + std::to_string(track_id);
@@ -628,8 +674,12 @@ GstPadProbeReturn PlateProbe::handleMeta(GstPadProbeInfo* info) {
     const double frame_w = static_cast<double>(frame->source_frame_width);
     const double frame_h = static_cast<double>(frame->source_frame_height);
 
-    const std::vector<std::vector<Point>> polygons =
-        polygonsFor(state->camera.code, frame_w, frame_h, frame_w, frame_h);
+    const PlateZones plate_zones =
+        plateZonesFor(state->camera.code, frame_w, frame_h, frame_w, frame_h);
+    // Không có polygon PLATE → không OCR, không vi phạm, không event. Bbox tracking
+    // vẫn được publish ở handleBbox.
+    if (plate_zones.polygons.empty()) continue;
+    const std::vector<std::vector<Point>>& polygons = plate_zones.polygons;
     const std::vector<LanePolygon> lane_polygons =
         lanePolygonsFor(state->camera.code, frame_w, frame_h, frame_w, frame_h);
 
@@ -684,7 +734,7 @@ GstPadProbeReturn PlateProbe::handleMeta(GstPadProbeInfo* info) {
 
       const int vehicle_cls = vehicle->class_id;
       const Point anchor = utils::anchorPoint(box, probe_cfg.anchor_bottom_ratio);
-      bool in_zone = polygons.empty();  // chưa cấu hình zone → coi như toàn khung
+      bool in_zone = false;  // polygons chắc chắn không rỗng ở đây
       for (const std::vector<Point>& polygon : polygons) {
         if (utils::pointInPolygon(anchor, polygon)) {
           in_zone = true;
