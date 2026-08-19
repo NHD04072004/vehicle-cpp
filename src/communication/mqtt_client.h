@@ -44,6 +44,7 @@ class MqttClient {
   bool loadAdapter();
   std::string writeBrokerConfig(const MqttConfig& config);
   bool openSession();  // tạo handle; caller setConnected/resubscribe
+  void closeSessionLocked();  // trả handle về adapter; gọi khi giữ mutex_
   bool subscribeLocked(const std::vector<std::string>& topics);
   void resubscribe();
   void workerLoop();

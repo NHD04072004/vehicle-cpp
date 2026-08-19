@@ -105,6 +105,13 @@ std::string MqttClient::writeBrokerConfig(const MqttConfig& config) {
   return std::string(path);
 }
 
+void MqttClient::closeSessionLocked() {
+  if (handle_ == nullptr) return;
+  live_handle_.store(nullptr);
+  if (g_disconnect != nullptr) g_disconnect(handle_);
+  handle_ = nullptr;
+}
+
 bool MqttClient::openSession() {
   if (handle_ != nullptr) return true;
   if (config_path_.empty()) config_path_ = writeBrokerConfig(config_);
@@ -203,8 +210,7 @@ void MqttClient::workerLoop() {
 
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      handle_ = nullptr;
-      live_handle_.store(nullptr);
+      closeSessionLocked();
     }
     if (connected_.load()) setConnected(false);
 
@@ -253,12 +259,9 @@ void MqttClient::disconnect() {
 
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    live_handle_.store(nullptr);
-    if (handle_ != nullptr && g_disconnect != nullptr) {
-      g_disconnect(handle_);
-      handle_ = nullptr;
-      LOG_INFO("mqtt: đã ngắt kết nối");
-    }
+    const bool had_session = handle_ != nullptr;
+    closeSessionLocked();
+    if (had_session) LOG_INFO("mqtt: đã ngắt kết nối");
   }
   connected_.store(false);
 

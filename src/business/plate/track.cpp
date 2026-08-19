@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <utility>
 
+#include "utils/geometry.h"
 #include "utils/string_utils.h"
 
 namespace vehicle {
@@ -96,13 +97,15 @@ bool TrackPlateState::finalizePlate(double now_s) {
   });
   has_final_plate_ = true;
   if (now_s > 0.0) final_at_s_ = now_s;
+  // Biển đến sau vi phạm → cặp đã đủ ngay tại đây.
+  if (wrong_way_hits_ > 0 && now_s > 0.0) setWrongWayPairedAt(now_s);
   pickBestSnapshotKey();
   return true;
 }
 
 PlateOcrStatus TrackPlateState::addOcrReading(const CharSequence& chars, const std::string& raw,
                                               double now_s, double mean_conf,
-                                              double sample_area) {
+                                              double sample_area, double plate_area) {
   if (!canOcr()) return PlateOcrStatus::kRejected;
   if (chars.empty()) return PlateOcrStatus::kRejected;
 
@@ -135,6 +138,11 @@ PlateOcrStatus TrackPlateState::addOcrReading(const CharSequence& chars, const s
     samples_by_plate_[plate_key] = cand;
     better_snap = true;
   }
+
+  // Điểm crop chấm theo chất lượng BIỂN (không phải độ gần của xe). Probe so
+  // điểm này với crop đang có trong kho ảnh của đúng chuỗi `plate_key`.
+  last_crop_cand_.mean_conf = cand.mean_conf;
+  last_crop_cand_.plate_area = std::max(0.0, plate_area);
 
   // Chốt sớm khi đủ N reading và xe không còn đang tiến gần (area không tăng).
   // Nếu vẫn tiến gần → giữ OCR tới hard-cap 2×N hoặc miss-finalize.
@@ -181,6 +189,57 @@ void TrackPlateState::addWrongLaneObservation(const std::string& zone_name) {
   ++wrong_lane_frames_;
   if (wrong_lane_zone_.empty()) wrong_lane_zone_ = zone_name;
   if (!has_wrong_lane_snapshot_) needs_wrong_lane_snapshot_ = true;
+}
+
+void TrackPlateState::pushAnchorHistory(const Point& p) {
+  anchor_history_.push_back(p);
+  if (anchor_history_.size() > kMotionHistoryLen)
+    anchor_history_.erase(anchor_history_.begin());
+}
+
+Point TrackPlateState::motionVector() const {
+  if (anchor_history_.size() < kMinMotionHistoryLen) return Point{0.0, 0.0};
+  if (isStationary()) return Point{0.0, 0.0};
+  const Point v = utils::motionVector(anchor_history_);
+  if (v.x * v.x + v.y * v.y < kMinMotionLenPx * kMinMotionLenPx) return Point{0.0, 0.0};
+  return v;
+}
+
+bool TrackPlateState::isStationary() const {
+  const size_t n = anchor_history_.size();
+  if (n < kMinMotionHistoryLen) return true;  // chưa đủ cơ sở kết luận đang chạy
+
+  // Quãng đường tịnh: xe bò chậm vẫn trôi đều một hướng, xe đỗ thì quay về chỗ cũ.
+  const Point& first = anchor_history_.front();
+  const Point& last = anchor_history_.back();
+  const double net_dx = last.x - first.x;
+  const double net_dy = last.y - first.y;
+  if (net_dx * net_dx + net_dy * net_dy > kStationaryNetPx * kStationaryNetPx)
+    return false;
+
+  // Tán xạ quanh tâm: mọi anchor nằm gọn trong bán kính = chỉ là nhiễu detection.
+  double cx = 0.0, cy = 0.0;
+  for (const Point& p : anchor_history_) {
+    cx += p.x;
+    cy += p.y;
+  }
+  cx /= static_cast<double>(n);
+  cy /= static_cast<double>(n);
+  for (const Point& p : anchor_history_) {
+    const double ddx = p.x - cx;
+    const double ddy = p.y - cy;
+    if (ddx * ddx + ddy * ddy > kStationaryRadiusPx * kStationaryRadiusPx) return false;
+  }
+  return true;
+}
+
+void TrackPlateState::addWrongWayObservation(const std::string& line_name, double now_s) {
+  ++wrong_way_hits_;
+  if (wrong_way_line_.empty()) wrong_way_line_ = line_name;
+  if (!has_wrong_way_snapshot_) needs_wrong_way_snapshot_ = true;
+  if (wrong_way_hit_at_s_ <= 0.0 && now_s > 0.0) wrong_way_hit_at_s_ = now_s;
+  // Vi phạm đến sau biển → cặp đã đủ ngay tại đây.
+  if (has_final_plate_ && now_s > 0.0) setWrongWayPairedAt(now_s);
 }
 
 int TrackPlateState::votedCls() const {

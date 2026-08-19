@@ -142,6 +142,20 @@ void loadViolation(const YAML::Node& node, ViolationConfig* v) {
   v->wrong_lane.enabled = get<bool>(wrong_lane, "enabled", v->wrong_lane.enabled);
   v->wrong_lane.min_hits = get<int>(wrong_lane, "min_hits", v->wrong_lane.min_hits);
   if (v->wrong_lane.min_hits < 1) v->wrong_lane.min_hits = 1;
+
+  const YAML::Node wrong_way = node["wrong_way"];
+  v->wrong_way.enabled = get<bool>(wrong_way, "enabled", v->wrong_way.enabled);
+  v->wrong_way.min_hits = get<int>(wrong_way, "min_hits", v->wrong_way.min_hits);
+  if (v->wrong_way.min_hits < 1) v->wrong_way.min_hits = 1;
+  v->wrong_way.settle_s = get<double>(wrong_way, "settle_s", v->wrong_way.settle_s);
+  if (v->wrong_way.settle_s < 0.0) v->wrong_way.settle_s = 0.0;
+  v->wrong_way.wait_pair_s = get<double>(wrong_way, "wait_pair_s", v->wrong_way.wait_pair_s);
+  if (v->wrong_way.wait_pair_s < 0.0) v->wrong_way.wait_pair_s = 0.0;
+  v->wrong_way.max_angle_deg =
+      get<double>(wrong_way, "max_angle_deg", v->wrong_way.max_angle_deg);
+  // Kẹp trong (0, 90): >= 90 sẽ nhận cả xe đi ngang/ngược → không còn ý nghĩa.
+  if (v->wrong_way.max_angle_deg <= 0.0 || v->wrong_way.max_angle_deg >= 90.0)
+    v->wrong_way.max_angle_deg = 40.0;
 }
 
 }  // namespace

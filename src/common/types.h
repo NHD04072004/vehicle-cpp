@@ -32,7 +32,7 @@ struct BoundingBox {
   bool valid() const { return x2 > x1 && y2 > y1; }
 };
 
-// Vùng ROI nhận từ MQTT `get_polygon` (chỉ zones, bỏ lines).
+// Vùng ROI nhận từ MQTT `get_polygon`, mảng "zones".
 struct Zone {
   std::string name;
   std::vector<std::string> ai_modules;
@@ -43,9 +43,25 @@ struct Zone {
   bool hasAiModule(const std::string& module) const;
 };
 
+// Vạch nhận từ MQTT `get_polygon`, mảng "lines" (tách khỏi "zones"): 2 điểm +
+// vector hướng. Xe cắt vạch khi đi CÙNG chiều `direction` → vi phạm.
+struct Line {
+  std::string name;
+  std::vector<std::string> ai_modules;
+  std::vector<Point> points;  // >= 2 điểm; dùng đoạn [0]→[1]
+  bool normalized = true;
+  // config.has_direction=true → direction hợp lệ (chiều CẤM — mũi tên vẽ
+  // trên line; xe đi CÙNG chiều mũi tên mà cắt vạch là vi phạm).
+  bool has_direction = false;
+  Point direction;  // vector đơn vị, cùng hệ toạ độ với points
+
+  bool hasAiModule(const std::string& module) const;
+};
+
 struct ZoneSet {
   std::string camera_code;
   std::vector<Zone> zones;
+  std::vector<Line> lines;
   uint64_t version = 0;  // tăng mỗi lần VMS cập nhật → invalidate cache.
 };
 
@@ -100,6 +116,11 @@ struct PlateEmit {
   std::string wrong_lane_zone; // tên zone LANE đầu tiên gây vi phạm (evidence)
   JpegImage wrong_lane_full;
   JpegImage wrong_lane_crop;
+  // Vi phạm đi ngược chiều (line tên REVERSE_DIRECTION, mọi loại xe).
+  int wrong_way_hits = 0;        // số lần cắt vạch ngược chiều
+  std::string wrong_way_line;    // tên line đầu tiên gây vi phạm (evidence)
+  JpegImage wrong_way_full;
+  JpegImage wrong_way_crop;
   // Mốc monotonic (giây) — latency debug.
   double created_at_s = 0.0;
   double first_ocr_at_s = 0.0;
@@ -112,5 +133,10 @@ struct PlateEmit {
 const char* vehicleClassName(int cls);
 
 std::set<int> laneAllowedClasses(const std::string& zone_name);
+
+// Tên line VMS dùng cho vi phạm đi ngược chiều.
+constexpr const char* kReverseDirectionLine = "REVERSE_DIRECTION";
+
+bool isReverseDirectionLine(const std::string& line_name);
 
 }  // namespace vehicle

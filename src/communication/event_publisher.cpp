@@ -132,6 +132,22 @@ bool EventPublisher::canPublishWrongLane(const Camera& camera, const PlateEmit& 
   return true;
 }
 
+bool EventPublisher::canPublishWrongWay(const Camera& camera, const PlateEmit& emit) const {
+  const WrongWayViolationConfig& wrong_way = config_.violation().wrong_way;
+  if (!wrong_way.enabled) return false;
+  // Bắt buộc đã CHẠM line REVERSE_DIRECTION ngược chiều.
+  if (emit.wrong_way_hits < wrong_way.min_hits) return false;
+
+  if (violations_ == nullptr ||
+      !violations_->allows(business::violation::kWrongWay, camera.id)) {
+    LOG_DEBUG("track %lu: WRONG_WAY (%d lần cắt) nhưng camera %s chưa bật mã này — bỏ qua",
+              static_cast<unsigned long>(emit.track_id), emit.wrong_way_hits,
+              camera.code.c_str());
+    return false;
+  }
+  return true;
+}
+
 bool EventPublisher::publishOneViolation(const Camera& camera, const PlateEmit& emit,
                                          const business::plate::EventParams& params,
                                          const std::string& violation_type_code,
@@ -171,36 +187,55 @@ bool EventPublisher::publishViolations(const Camera& camera, const PlateEmit& em
   if (canPublishWrongLane(camera, emit)) {
     Json::Value evidence(Json::objectValue);
     evidence["lane_zone"] = emit.wrong_lane_zone;
-    // WRONG_LANE dùng ảnh chụp đúng lúc vi phạm; các event khác giữ ảnh đẹp nhất.
-    business::plate::EventParams lane_params = vparams;
-    if (!emit.wrong_lane_full.empty()) {
-      const std::string base = "vehicle_" + std::to_string(emit.track_id) + "_wrong_lane";
-      if (dry_run_) {
-        lane_params.snapshot_url = "dry-run/" + base + ".jpg";
-        lane_params.snapshot_plate_key =
-            emit.wrong_lane_crop.empty() ? "" : "dry-run/" + base + "_plate.jpg";
-      } else {
-        const std::string key =
-            uploader_->upload(camera.id, "vehicle", emit.wrong_lane_full.data, base + ".jpg");
-        if (key.empty()) {
-          LOG_WARN("track %lu: upload ảnh WRONG_LANE thất bại — dùng ảnh mặc định",
-                   static_cast<unsigned long>(emit.track_id));
-        } else {
-          lane_params.snapshot_url = key;
-          lane_params.snapshot_plate_key =
-              emit.wrong_lane_crop.empty()
-                  ? ""
-                  : uploader_->upload(camera.id, "plate", emit.wrong_lane_crop.data,
-                                      base + "_plate.jpg");
-        }
-      }
-    }
+    const business::plate::EventParams lane_params = paramsWithViolationImages(
+        camera, emit, vparams, emit.wrong_lane_full, emit.wrong_lane_crop, "wrong_lane",
+        business::violation::kWrongLane);
     if (!publishOneViolation(camera, emit, lane_params, business::violation::kWrongLane,
                              evidence))
       any_failed = true;
   }
 
+  if (canPublishWrongWay(camera, emit)) {
+    Json::Value evidence(Json::objectValue);
+    evidence["line_name"] = emit.wrong_way_line;
+    evidence["road_type"] = "highway";
+    const business::plate::EventParams way_params = paramsWithViolationImages(
+        camera, emit, vparams, emit.wrong_way_full, emit.wrong_way_crop, "wrong_way",
+        business::violation::kWrongWay);
+    if (!publishOneViolation(camera, emit, way_params, business::violation::kWrongWay,
+                             evidence))
+      any_failed = true;
+  }
+
   return !any_failed;
+}
+
+business::plate::EventParams EventPublisher::paramsWithViolationImages(
+    const Camera& camera, const PlateEmit& emit, const business::plate::EventParams& base_params,
+    const JpegImage& full, const JpegImage& crop, const std::string& suffix,
+    const std::string& violation_type_code) {
+  // Ảnh chụp đúng lúc vi phạm; các event khác giữ ảnh đẹp nhất.
+  business::plate::EventParams params = base_params;
+  if (full.empty()) return params;
+
+  const std::string base = "vehicle_" + std::to_string(emit.track_id) + "_" + suffix;
+  if (dry_run_) {
+    params.snapshot_url = "dry-run/" + base + ".jpg";
+    params.snapshot_plate_key = crop.empty() ? "" : "dry-run/" + base + "_plate.jpg";
+    return params;
+  }
+
+  const std::string key = uploader_->upload(camera.id, "vehicle", full.data, base + ".jpg");
+  if (key.empty()) {
+    LOG_WARN("track %lu: upload ảnh %s thất bại — dùng ảnh mặc định",
+             static_cast<unsigned long>(emit.track_id), violation_type_code.c_str());
+    return params;
+  }
+  params.snapshot_url = key;
+  params.snapshot_plate_key =
+      crop.empty() ? ""
+                   : uploader_->upload(camera.id, "plate", crop.data, base + "_plate.jpg");
+  return params;
 }
 
 }  // namespace comm

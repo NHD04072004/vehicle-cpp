@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <memory>
 #include <sstream>
@@ -117,6 +118,42 @@ const Json::Value* findZonesArray(const Json::Value& root) {
     }
   }
   return nullptr;
+}
+
+// Mảng "lines" nằm song song với "zones" trong payload get_polygon.
+const Json::Value* findLinesArray(const Json::Value& root) {
+  if (!root.isObject()) return nullptr;
+  if (root.isMember("lines") && root["lines"].isArray()) return &root["lines"];
+  for (const char* key : {"data", "payload", "result"}) {
+    if (root.isMember(key)) {
+      const Json::Value* nested = findLinesArray(root[key]);
+      if (nested != nullptr) return nested;
+    }
+  }
+  return nullptr;
+}
+
+// direction_vector: [dx, dy] hoặc {"x":..,"y":..}. Trả false nếu vector ~0.
+bool parseDirection(const Json::Value& node, Point* out) {
+  if (node.isArray() && node.size() >= 2 && node[0].isNumeric() && node[1].isNumeric()) {
+    *out = {node[0].asDouble(), node[1].asDouble()};
+  } else if (node.isObject() && node.isMember("x") && node.isMember("y") &&
+             node["x"].isNumeric() && node["y"].isNumeric()) {
+    *out = {node["x"].asDouble(), node["y"].asDouble()};
+  } else {
+    return false;
+  }
+  return std::abs(out->x) > 1e-9 || std::abs(out->y) > 1e-9;
+}
+
+bool hasDirectionFlag(const Json::Value& line) {
+  if (!line.isObject()) return false;
+  const Json::Value& cfg = line["config"];
+  if (cfg.isObject() && cfg.isMember("has_direction") && cfg["has_direction"].isBool())
+    return cfg["has_direction"].asBool();
+  if (line.isMember("has_direction") && line["has_direction"].isBool())
+    return line["has_direction"].asBool();
+  return false;
 }
 
 // Tách giá trị ở vị trí `marker` của template khi topic khớp prefix/suffix.
@@ -243,29 +280,52 @@ void VmsClient::handleZones(const std::string& camera_code, const std::string& p
     return;
   }
   const Json::Value* array = findZonesArray(root);
-  if (array == nullptr) {
-    LOG_WARN("zones[%s]: không tìm thấy mảng zones", camera_code.c_str());
+  const Json::Value* lines_array = findLinesArray(root);
+  if (array == nullptr && lines_array == nullptr) {
+    LOG_WARN("zones[%s]: không tìm thấy mảng zones/lines", camera_code.c_str());
     return;
   }
 
   ZoneSet set;
   set.camera_code = camera_code;
   double max_coord = 0.0;
-  for (const Json::Value& node : *array) {
-    const Json::Value* points_node = node.isArray() ? &node : findPointsNode(node);
-    if (points_node == nullptr) continue;
-    Zone zone;
-    zone.name = asString(node, "name", asString(node, "zone_name"));
-    zone.ai_modules = aiModulesOf(node);
-    zone.points = parsePoints(*points_node);
-    if (zone.points.size() < 3) continue;
-    for (const Point& p : zone.points)
-      max_coord = std::max(max_coord, std::max(p.x, p.y));
-    set.zones.push_back(std::move(zone));
+  if (array != nullptr) {
+    for (const Json::Value& node : *array) {
+      const Json::Value* points_node = node.isArray() ? &node : findPointsNode(node);
+      if (points_node == nullptr) continue;
+      Zone zone;
+      zone.name = asString(node, "name", asString(node, "zone_name"));
+      zone.ai_modules = aiModulesOf(node);
+      zone.points = parsePoints(*points_node);
+      if (zone.points.size() < 3) continue;
+      for (const Point& p : zone.points)
+        max_coord = std::max(max_coord, std::max(p.x, p.y));
+      set.zones.push_back(std::move(zone));
+    }
   }
+
+  // Lines: chỉ cần 2 điểm (khác zone >= 3) — dùng cho vi phạm cắt vạch.
+  if (lines_array != nullptr) {
+    for (const Json::Value& node : *lines_array) {
+      const Json::Value* points_node = node.isArray() ? &node : findPointsNode(node);
+      if (points_node == nullptr) continue;
+      Line line;
+      line.name = asString(node, "name", asString(node, "zone_name"));
+      line.ai_modules = aiModulesOf(node);
+      line.points = parsePoints(*points_node);
+      if (line.points.size() < 2) continue;
+      if (hasDirectionFlag(node) && node.isObject())
+        line.has_direction = parseDirection(node["direction_vector"], &line.direction);
+      for (const Point& p : line.points)
+        max_coord = std::max(max_coord, std::max(p.x, p.y));
+      set.lines.push_back(std::move(line));
+    }
+  }
+
   // Toạ độ > 1 → VMS gửi theo pixel; ngược lại là chuẩn hoá 0..1.
   const bool normalized = max_coord <= 1.0;
   for (Zone& zone : set.zones) zone.normalized = normalized;
+  for (Line& line : set.lines) line.normalized = normalized;
 
   {
     std::lock_guard<std::mutex> lock(mutex_);

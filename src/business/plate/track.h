@@ -38,9 +38,29 @@ struct SnapshotScore {
 };
 
 // Ưu tiên xe gần (diện tích lớn), rồi mean conf ký tự.
+// Dùng cho ảnh PHƯƠNG TIỆN (full-frame + bbox xanh) và mọi event vi phạm.
 inline bool snapshotScoreBetter(const SnapshotScore& cand, const SnapshotScore& cur) {
   if (cand.area != cur.area) return cand.area > cur.area;
   return cand.mean_conf > cur.mean_conf;
+}
+
+// Điểm riêng cho ảnh CROP BIỂN: chất lượng biển, không phải độ gần của xe.
+// Xe to nhưng biển mờ không được thắng frame biển nét.
+struct CropScore {
+  double mean_conf = 0.0;   // mean conf ký tự OCR
+  double plate_area = 0.0;  // diện tích bbox BIỂN (px²)
+  bool valid() const { return plate_area > 0.0; }
+};
+
+// Conf là tiêu chí chính (biển đọc rõ); hoà conf → biển to hơn.
+// So sánh conf theo bước 0.02 để nhiễu nhỏ không lật ngược lựa chọn.
+inline bool cropScoreBetter(const CropScore& cand, const CropScore& cur) {
+  if (!cur.valid()) return cand.valid();
+  if (!cand.valid()) return false;
+  const double delta = cand.mean_conf - cur.mean_conf;
+  if (delta > 0.02) return true;
+  if (delta < -0.02) return false;
+  return cand.plate_area > cur.plate_area;
 }
 
 class TrackPlateState {
@@ -59,7 +79,7 @@ class TrackPlateState {
   // mean_conf: mean conf ký tự; sample_area: diện tích bbox xe — chọn snapshot theo chuỗi biển.
   PlateOcrStatus addOcrReading(const CharSequence& chars, const std::string& raw,
                                double now_s = 0.0, double mean_conf = 0.0,
-                               double sample_area = 0.0);
+                               double sample_area = 0.0, double plate_area = 0.0);
 
   double idleOutOfZoneS(double now_s) const;
   double ageS(double now_s) const;
@@ -79,6 +99,37 @@ class TrackPlateState {
   bool hasWrongLaneSnapshot() const { return has_wrong_lane_snapshot_; }
   void markHasWrongLaneSnapshot() { has_wrong_lane_snapshot_ = true; }
 
+  // Vị trí anchor frame trước — để phát hiện cắt vạch giữa 2 frame.
+  bool hasLastAnchor() const { return has_last_anchor_; }
+  const Point& lastAnchor() const { return last_anchor_; }
+  void setLastAnchor(const Point& p) { last_anchor_ = p; has_last_anchor_ = true; }
+
+  // Lịch sử anchor (cũ → mới, tối đa kMotionHistoryLen) để tính vector hướng
+  // chuyển động mượt hơn hiệu 2 frame liên tiếp.
+  void pushAnchorHistory(const Point& p);
+  const std::vector<Point>& anchorHistory() const { return anchor_history_; }
+  // Hướng chuyển động hiện tại; {0,0} nếu chưa đủ điểm hoặc xe đứng yên.
+  Point motionVector() const;
+  // Xe đang đứng yên: anchor chỉ dao động quanh 1 tâm (sai số detection), không
+  // trôi theo hướng nào. Chưa đủ history cũng coi là chưa đủ cơ sở → true.
+  bool isStationary() const;
+
+  void addWrongWayObservation(const std::string& line_name, double now_s = 0.0);
+  bool needsWrongWaySnapshot() const { return needs_wrong_way_snapshot_; }
+  void markWrongWaySnapshotTaken() { needs_wrong_way_snapshot_ = false; }
+  bool hasWrongWaySnapshot() const { return has_wrong_way_snapshot_; }
+  void markHasWrongWaySnapshot() { has_wrong_way_snapshot_ = true; }
+
+  // --- Rendezvous biển số ↔ vi phạm ngược chiều ---
+  // Bên nào đến trước thì cache lại; đủ cả hai → chờ settle rồi mới bắn event.
+  // Quá hạn chờ mà thiếu vế còn lại → bỏ track.
+  double wrongWayHitAtS() const { return wrong_way_hit_at_s_; }
+  // Mốc "đủ cả hai vế" (0 nếu chưa đủ). Emit sau mốc này + settle.
+  double wrongWayPairedAtS() const { return wrong_way_paired_at_s_; }
+  void setWrongWayPairedAt(double now_s) {
+    if (wrong_way_paired_at_s_ <= 0.0) wrong_way_paired_at_s_ = now_s;
+  }
+
   // Class: nhiều phiếu nhất; hoà → tổng conf cao hơn. -1 nếu chưa có.
   int votedCls() const;
 
@@ -91,6 +142,7 @@ class TrackPlateState {
   bool inPolygon() const { return in_polygon_; }
   bool everEnteredPolygon() const { return ever_entered_polygon_; }
   bool hasSnapshotSamples() const { return !samples_by_plate_.empty(); }
+  const CropScore& lastCropCandidate() const { return last_crop_cand_; }
   // Key ảnh sau chốt (chuỗi biển của mẫu được chọn). Rỗng nếu chưa chốt / chưa có mẫu.
   const std::string& bestSnapshotKey() const { return best_snapshot_key_; }
   double createdAtS() const { return created_at_s_; }
@@ -100,6 +152,8 @@ class TrackPlateState {
   int noHelmetCount() const { return max_no_helmet_count_; }
   int wrongLaneFrames() const { return wrong_lane_frames_; }
   const std::string& wrongLaneZone() const { return wrong_lane_zone_; }
+  int wrongWayHits() const { return wrong_way_hits_; }
+  const std::string& wrongWayLine() const { return wrong_way_line_; }
 
  private:
   bool finalizePlate(double now_s);
@@ -130,9 +184,21 @@ class TrackPlateState {
   std::string wrong_lane_zone_;
   bool needs_wrong_lane_snapshot_ = false;  // đang chờ probe chụp ảnh vi phạm
   bool has_wrong_lane_snapshot_ = false;    // đã có ảnh lúc sai làn
+  int wrong_way_hits_ = 0;
+  std::string wrong_way_line_;
+  bool needs_wrong_way_snapshot_ = false;
+  bool has_wrong_way_snapshot_ = false;
+  Point last_anchor_;
+  bool has_last_anchor_ = false;
+  std::vector<Point> anchor_history_;
+  double wrong_way_hit_at_s_ = 0.0;     // lúc cắt vạch (0 = chưa vi phạm)
+  double wrong_way_paired_at_s_ = 0.0;  // lúc đủ CẢ biển + vi phạm
   // Chuỗi biển raw → điểm mẫu tốt nhất (phatnguoi _sample_by_plate).
   std::map<std::string, SnapshotScore> samples_by_plate_;
   std::string best_snapshot_key_;
+  // Điểm crop của reading GẦN NHẤT. Không có sổ "đã chụp" ở đây: kho ảnh trong
+  // probe là nguồn sự thật duy nhất, tránh sổ và kho lệch nhau.
+  CropScore last_crop_cand_;
 };
 
 class DedupCache {

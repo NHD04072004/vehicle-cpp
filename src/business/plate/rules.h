@@ -32,6 +32,23 @@ constexpr double kForceDeleteAgeS = 120.0;
 
 constexpr size_t kDedupCacheSize = 50;
 
+// Ngưỡng dịch chuyển anchor (px) giữa 2 frame để coi là xe ĐANG di chuyển.
+// Dưới ngưỡng = jitter bbox của xe đứng yên → không tính cắt vạch.
+constexpr double kMinWrongWayMovePx = 2.0;
+
+// Số anchor giữ lại để tính vector hướng chuyển động (3-4 bbox là đủ mượt).
+constexpr size_t kMotionHistoryLen = 4;
+// Cần ít nhất ngần này anchor mới dám kết luận hướng.
+constexpr size_t kMinMotionHistoryLen = 3;
+// Tổng quãng đường (px) của cả history phải vượt ngưỡng này thì hướng mới đáng tin.
+constexpr double kMinMotionLenPx = 6.0;
+// Xe ĐỨNG YÊN: mọi anchor trong history nằm gọn trong bán kính này quanh tâm.
+// Bbox xe đỗ vẫn nhấp nháy vài px mỗi frame nhưng không trôi đi đâu, nên tán xạ
+// quanh tâm mới là dấu hiệu phân biệt với xe đang bò chậm.
+constexpr double kStationaryRadiusPx = 4.0;
+// Xe đứng yên: quãng đường tịnh (đầu → cuối history) không vượt ngưỡng này.
+constexpr double kStationaryNetPx = 5.0;
+
 // N = digit, C = alpha; độ dài phải khớp.
 bool matchesPlateStyle(const std::string& plate, const std::string& style);
 

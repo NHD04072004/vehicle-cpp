@@ -8,3 +8,13 @@ violation:
   wrong_lane:              # WRONG_LANE — xe đi vào zone *_LANE không dành cho loại xe đó
     enabled: true
     min_hits: 1            # số frame tối thiểu detect được mới chốt vi phạm
+  wrong_way:               # WRONG_WAY — xe CHẠM line REVERSE_DIRECTION ngược direction_vector
+    enabled: true
+    min_hits: 1            # số lần cắt vạch ngược chiều tối thiểu
+    # Biển số và vi phạm không đến cùng lúc: bên nào có trước thì cache lại.
+    settle_s: 1.5          # đủ CẢ biển + vi phạm → chờ thêm ngần này rồi bắn
+    wait_pair_s: 5.0       # quá hạn kể từ lúc cắt vạch mà vẫn thiếu → bỏ track
+    # Hướng chuyển động lấy từ 3-4 anchor gần nhất (đã lọc jitter detection).
+    # Lệch <= ngần này độ so với direction_vector = đi CÙNG chiều mũi tên cấm.
+    # Phải trong khoảng (0, 90); > 90 độ luôn là ngược chiều (hợp lệ).
+    max_angle_deg: 40.0

@@ -30,9 +30,17 @@ class EventPublisher {
  private:
   bool canPublishNoHelmet(const Camera& camera, const PlateEmit& emit) const;
   bool canPublishWrongLane(const Camera& camera, const PlateEmit& emit) const;
+  bool canPublishWrongWay(const Camera& camera, const PlateEmit& emit) const;
 
   bool publishViolations(const Camera& camera, const PlateEmit& emit,
                          const business::plate::EventParams& params);
+
+  // Upload ảnh bằng chứng vi phạm (nếu có) → params với snapshot riêng.
+  business::plate::EventParams paramsWithViolationImages(
+      const Camera& camera, const PlateEmit& emit,
+      const business::plate::EventParams& base_params, const JpegImage& full,
+      const JpegImage& crop, const std::string& suffix,
+      const std::string& violation_type_code);
 
   bool publishOneViolation(const Camera& camera, const PlateEmit& emit,
                            const business::plate::EventParams& params,

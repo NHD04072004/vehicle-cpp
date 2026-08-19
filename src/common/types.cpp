@@ -25,6 +25,17 @@ bool Zone::hasAiModule(const std::string& module) const {
   return false;
 }
 
+bool Line::hasAiModule(const std::string& module) const {
+  const std::string want = utils::toUpper(utils::trim(module));
+  for (const std::string& item : ai_modules)
+    if (utils::toUpper(utils::trim(item)) == want) return true;
+  return false;
+}
+
+bool isReverseDirectionLine(const std::string& line_name) {
+  return utils::toUpper(utils::trim(line_name)) == kReverseDirectionLine;
+}
+
 const char* vehicleClassName(int cls) {
   switch (cls) {
     case kClassCar: return "car";

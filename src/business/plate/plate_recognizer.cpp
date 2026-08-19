@@ -2,6 +2,7 @@
 
 #include "business/plate/rules.h"
 #include "common/logging.h"
+#include "utils/geometry.h"
 #include "utils/latency.h"
 
 namespace vehicle {
@@ -93,14 +94,120 @@ void PlateRecognizer::observeLane(uint64_t track_id, const std::string& zone_nam
             it->second.wrongLaneFrames());
 }
 
+bool PlateRecognizer::observeWrongWay(uint64_t track_id, const Point& anchor,
+                                      const std::vector<WrongWayLine>& lines, double now_s) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = tracks_.find(track_id);
+  if (it == tracks_.end()) return false;
+  TrackPlateState& state = it->second;
+
+  const bool had_prev = state.hasLastAnchor();
+  const Point prev = state.lastAnchor();
+  state.setLastAnchor(anchor);
+  state.pushAnchorHistory(anchor);
+  if (!had_prev || lines.empty()) return false;
+
+  const double dx = anchor.x - prev.x;
+  const double dy = anchor.y - prev.y;
+  if (dx * dx + dy * dy < kMinWrongWayMovePx * kMinWrongWayMovePx) return false;
+
+  // Xe đỗ ngay trên vạch: bbox vẫn nhấp nháy vài px mỗi frame nên đoạn
+  // prev→anchor liên tục "cắt" line. Xét trạng thái đứng yên trên cả history
+  // (tán xạ quanh 1 tâm) mới loại được, ngưỡng 1 frame là không đủ.
+  if (state.isStationary()) return false;
+
+  // Hướng chuyển động lấy từ 3-4 anchor gần nhất: hiệu 2 frame liên tiếp quá
+  // nhạy với jitter bbox, đủ để lật ngược dấu tích vô hướng ở xe đi chậm.
+  const Point motion = state.motionVector();
+  if (motion.x == 0.0 && motion.y == 0.0) return false;  // chưa đủ cơ sở về hướng
+
+  for (const WrongWayLine& line : lines) {
+    // Điều kiện 1: phải thực sự cắt qua line REVERSE_DIRECTION.
+    if (!utils::segmentsIntersect(prev, anchor, line.a, line.b)) continue;
+
+    // Điều kiện 2: hướng đi lệch <= ngưỡng so với direction_vector (chiều CẤM
+    // — mũi tên vẽ trên line). Lệch > 90 độ là đi ngược mũi tên → hợp lệ.
+    const double angle = utils::angleBetweenDeg(motion, line.direction);
+    if (angle < 0.0 || angle > ww_max_angle_deg_) {
+      LOG_DEBUG("track %lu: cắt line '%s' nhưng lệch %.1f độ (> %.1f) — bỏ qua",
+                static_cast<unsigned long>(track_id), line.name.c_str(), angle,
+                ww_max_angle_deg_);
+      continue;
+    }
+
+    state.addWrongWayObservation(line.name, now_s);
+    LOG_INFO("track %lu: WRONG_WAY cắt line '%s' cùng chiều cấm, lệch %.1f độ (lần %d)",
+             static_cast<unsigned long>(track_id), line.name.c_str(), angle,
+             state.wrongWayHits());
+    return true;
+  }
+  return false;
+}
+
+CropScore PlateRecognizer::lastCropCandidate(uint64_t track_id) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = tracks_.find(track_id);
+  if (it == tracks_.end()) return CropScore{};
+  return it->second.lastCropCandidate();
+}
+
+bool PlateRecognizer::needsWrongWaySnapshot(uint64_t track_id) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = tracks_.find(track_id);
+  return it != tracks_.end() && it->second.needsWrongWaySnapshot();
+}
+
+void PlateRecognizer::markWrongWaySnapshotTaken(uint64_t track_id) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = tracks_.find(track_id);
+  if (it == tracks_.end()) return;
+  it->second.markWrongWaySnapshotTaken();
+  it->second.markHasWrongWaySnapshot();
+}
+
+void PlateRecognizer::setWrongWayTiming(double settle_s, double wait_pair_s) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  ww_settle_s_ = std::max(0.0, settle_s);
+  ww_wait_pair_s_ = std::max(0.0, wait_pair_s);
+}
+
+void PlateRecognizer::setWrongWayMaxAngle(double max_angle_deg) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (max_angle_deg <= 0.0 || max_angle_deg >= 90.0) return;  // giữ mặc định
+  ww_max_angle_deg_ = max_angle_deg;
+}
+
+size_t PlateRecognizer::dropStaleWrongWay(double now_s) {
+  if (ww_wait_pair_s_ <= 0.0) return 0;
+  std::lock_guard<std::mutex> lock(mutex_);
+  size_t dropped = 0;
+  for (auto& entry : tracks_) {
+    TrackPlateState& state = entry.second;
+    if (state.isPushed() || state.isPosted()) continue;
+    if (state.wrongWayHits() <= 0) continue;
+    const double hit_at = state.wrongWayHitAtS();
+    if (hit_at <= 0.0 || now_s < hit_at + ww_wait_pair_s_) continue;
+
+    LOG_INFO("track %lu: WRONG_WAY quá %.1fs %s — bỏ track",
+             static_cast<unsigned long>(entry.first), ww_wait_pair_s_,
+             state.hasFinalPlate() ? "không đủ ảnh (crop biển + full-frame)"
+                                   : "không có biển số");
+    state.markPushed();
+    state.markPosted();
+    ++dropped;
+  }
+  return dropped;
+}
+
 PlateOcrStatus PlateRecognizer::addOcrReading(uint64_t track_id, const CharSequence& chars,
                                               const std::string& raw, double now_s,
-                                              double mean_conf, double sample_area) {
+                                              double mean_conf, double sample_area,
+                                              double plate_area) {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = tracks_.find(track_id);
   if (it == tracks_.end()) return PlateOcrStatus::kRejected;
   const PlateOcrStatus status =
-      it->second.addOcrReading(chars, raw, now_s, mean_conf, sample_area);
+      it->second.addOcrReading(chars, raw, now_s, mean_conf, sample_area, plate_area);
   if (plateOcrAccepted(status)) {
     LOG_DEBUG("track %lu: OCR '%s' (%d/%d)%s%s", static_cast<unsigned long>(track_id),
               raw.c_str(), it->second.plateRecognizeCount(), config_.max_recognize_times,
@@ -170,6 +277,13 @@ std::vector<PendingEmit> PlateRecognizer::collectReady(double now_s) {
     TrackPlateState& state = entry.second;
     if (!state.hasFinalPlate() || state.isPushed() || state.isPosted()) continue;
 
+    // Có vi phạm ngược chiều → chờ settle sau khi đủ CẢ biển lẫn vi phạm, để gom
+    // nốt ảnh (crop biển + full-frame) của những frame cuối.
+    if (ww_settle_s_ > 0.0 && state.wrongWayHits() > 0) {
+      const double paired = state.wrongWayPairedAtS();
+      if (paired > 0.0 && now_s < paired + ww_settle_s_) continue;
+    }
+
     auto attempt = last_attempt_s_.find(entry.first);
     if (attempt != last_attempt_s_.end() && now_s - attempt->second < retry_interval_s_)
       continue;
@@ -194,7 +308,8 @@ std::vector<PendingEmit> PlateRecognizer::collectReady(double now_s) {
                      state.createdAtS(), state.firstOcrAtS(), state.finalAtS(),
                      state.plateRecognizeCount(), state.noHelmetFrames(),
                      state.noHelmetCount(), state.wrongLaneFrames(), state.wrongLaneZone(),
-                     state.hasWrongLaneSnapshot()});
+                     state.hasWrongLaneSnapshot(), state.wrongWayHits(),
+                     state.wrongWayLine(), state.hasWrongWaySnapshot()});
   }
   return ready;
 }

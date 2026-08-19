@@ -7,6 +7,7 @@ namespace violation {
 
 constexpr const char* kNoHelmet = "NO_HELMET";
 constexpr const char* kWrongLane = "WRONG_LANE";
+constexpr const char* kWrongWay = "WRONG_WAY";
 
 }  // namespace violation
 }  // namespace business

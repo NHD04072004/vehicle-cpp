@@ -28,6 +28,13 @@ namespace probes {
 struct SnapshotImages {
   JpegImage full;
   JpegImage crop;
+  // Điểm chất lượng của `crop` đang giữ — nguồn sự thật để quyết định có chụp
+  // lại hay không (thay cho sổ ghi cũ ở TrackPlateState).
+  business::plate::CropScore crop_score;
+  // Hạn chờ crop đã submit (monotonic giây, 0 = không chờ). nvds_obj_enc bất
+  // đồng bộ: JPEG chỉ về ở image probe. Chặn retainSingleSnapshot xoá mất chỗ
+  // nhận ảnh, nhưng có hạn — encode fail thì phải được chụp lại.
+  double crop_pending_until_s = 0.0;
   // Bbox xe (px) gắn với full — vẽ xanh lên JPEG lúc emit.
   float left = 0.0f;
   float top = 0.0f;
@@ -107,14 +114,24 @@ class PlateProbe {
     bool configured = false;
   };
 
+  // Tạo recognizer đã nạp sẵn timing rendezvous WRONG_WAY.
+  std::unique_ptr<business::plate::PlateRecognizer> makeRecognizer() const;
   SourceState* sourceState(unsigned int source_id);
   PlateZones plateZonesFor(const std::string& camera_code, double frame_w, double frame_h,
                            double source_w, double source_h);
   std::vector<LanePolygon> lanePolygonsFor(const std::string& camera_code,
                                            double frame_w, double frame_h,
                                            double source_w, double source_h);
+  // Line REVERSE_DIRECTION đã scale sang pixel; bỏ line thiếu direction.
+  std::vector<business::plate::WrongWayLine> wrongWayLinesFor(
+      const std::string& camera_code, double frame_w, double frame_h, double source_w,
+      double source_h);
+  // true nếu camera có line REVERSE_DIRECTION dùng được (đủ direction).
+  bool hasWrongWayLine(const std::string& camera_code);
   // Cảnh báo 1 lần/version khi ZoneSet không chứa zone PLATE nào.
   void warnMissingPlateZone(const std::string& camera_code, const ZoneSet& set);
+  void warnLineWithoutDirection(const std::string& camera_code, const ZoneSet& set,
+                                const std::string& line_name);
   void enqueue(EmitJob job);
   void workerLoop();
   void clearPendingFor(unsigned int source_id);
@@ -130,6 +147,8 @@ class PlateProbe {
   std::map<std::string, ZoneSet> zones_;
   // camera_code → version đã cảnh báo thiếu zone PLATE (bảo vệ bởi zones_mutex_).
   std::map<std::string, uint64_t> warned_zone_version_;
+  // camera_code → version đã cảnh báo line thiếu direction (bảo vệ bởi zones_mutex_).
+  std::map<std::string, uint64_t> warned_line_version_;
 
   std::mutex pending_mutex_;
   std::map<std::pair<unsigned int, uint64_t>, std::vector<PendingEncode>> pending_frames_;

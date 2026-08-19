@@ -107,9 +107,23 @@ struct LaneViolationConfig {
   int min_hits = 1;  // số frame tối thiểu detect được mới chốt vi phạm
 };
 
+// `violation.wrong_way.*` — đi ngược chiều (line REVERSE_DIRECTION, mọi loại xe).
+// Biển số và vi phạm đến không cùng lúc: bên nào đến trước được cache lại, đủ cả
+// hai thì chờ `settle_s` rồi bắn. Quá `wait_pair_s` mà vẫn thiếu vế kia → bỏ.
+struct WrongWayViolationConfig {
+  bool enabled = true;
+  int min_hits = 1;        // số lần cắt vạch ngược chiều tối thiểu mới chốt vi phạm
+  double settle_s = 1.5;   // chờ sau khi đủ cả biển + vi phạm (gom nốt ảnh đẹp)
+  double wait_pair_s = 5.0;  // hạn chờ vế còn lại; quá hạn → bỏ track
+  // Góc lệch tối đa (độ) giữa hướng chuyển động của xe và direction_vector để
+  // vẫn coi là ĐI CÙNG CHIỀU mũi tên cấm. > 90 là ngược chiều (hợp lệ).
+  double max_angle_deg = 40.0;
+};
+
 struct ViolationConfig {
   HelmetViolationConfig helmet;
   LaneViolationConfig wrong_lane;
+  WrongWayViolationConfig wrong_way;
 };
 
 struct MqttConfig {

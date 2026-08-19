@@ -15,6 +15,7 @@
 #include <utility>
 #include <vector>
 
+#include "business/violation/constants.h"
 #include "common/logging.h"
 #include "probes/char_assembler.h"
 #include "utils/geometry.h"
@@ -32,8 +33,12 @@ constexpr size_t kMaxCachedImages = 16;
 constexpr size_t kMaxEmitQueue = 8;
 constexpr int kJpegQuality = 80;
 constexpr double kMemStatsIntervalS = 5.0;
+// Hạn chờ crop đã submit encode. Đủ dài để JPEG kịp về ở image probe, đủ ngắn
+// để encode fail không khoá track khỏi việc chụp lại.
+constexpr double kCropPendingTtlS = 0.5;
 constexpr const char* kPlateZoneName = "PLATE";
 constexpr const char* kWrongLaneSnapshotKey = "__WRONG_LANE__";
+constexpr const char* kWrongWaySnapshotKey = "__WRONG_WAY__";
 
 bool isPlateZone(const Zone& zone) {
   if (!laneAllowedClasses(zone.name).empty()) return false;
@@ -80,20 +85,55 @@ BoundingBox toBox(const NvOSD_RectParams& rect) {
   return box;
 }
 
-void retainSingleSnapshot(TrackSnapshots* bank, const std::string& prefer_key) {
+// Ảnh bằng chứng vi phạm gắn với đúng thời điểm vi phạm (không phải chất lượng)
+// nên không tái tạo được ở frame sau → luôn giữ lại.
+bool isViolationSnapshotKey(const std::string& key) {
+  return key == kWrongLaneSnapshotKey || key == kWrongWaySnapshotKey;
+}
+
+// Key được bảo vệ khỏi retainSingleSnapshot (giữ nguyên cả full lẫn crop).
+bool isProtectedSnapshotKey(const std::string& key) {
+  return isViolationSnapshotKey(key);
+}
+
+// Chỉ giữ 1 full-frame (ảnh phương tiện nặng) là của `prefer_key`; các key khác
+// bị bỏ full nhưng GIỮ crop biển. Chuỗi biển nào thắng vote lúc chốt cũng vẫn
+// còn crop của đúng frame đã đọc ra chuỗi đó.
+// `now_s` để bỏ entry có hạn chờ crop đã quá hạn (encode fail, ảnh không về).
+void retainSingleSnapshot(TrackSnapshots* bank, const std::string& prefer_key, double now_s) {
   if (bank == nullptr || prefer_key.empty() || bank->by_plate.size() <= 1) return;
-  auto it = bank->by_plate.find(prefer_key);
-  if (it == bank->by_plate.end()) return;
-  SnapshotImages keep = std::move(it->second);
-  // Ảnh bằng chứng sai làn phải sống sót: nó gắn với thời điểm vi phạm, không
-  // phải chất lượng, nên không thể tái tạo ở frame sau.
-  auto lane_it = bank->by_plate.find(kWrongLaneSnapshotKey);
-  SnapshotImages keep_lane;
-  const bool has_lane = lane_it != bank->by_plate.end() && prefer_key != kWrongLaneSnapshotKey;
-  if (has_lane) keep_lane = std::move(lane_it->second);
-  bank->by_plate.clear();
-  bank->by_plate.emplace(prefer_key, std::move(keep));
-  if (has_lane) bank->by_plate.emplace(kWrongLaneSnapshotKey, std::move(keep_lane));
+  if (bank->by_plate.find(prefer_key) == bank->by_plate.end()) return;
+
+  for (auto it = bank->by_plate.begin(); it != bank->by_plate.end();) {
+    if (it->first == prefer_key || isProtectedSnapshotKey(it->first)) {
+      ++it;
+      continue;
+    }
+    // Crop đang bay trong pipeline: xoá bây giờ thì JPEG về sau rơi vào entry
+    // mới không có full → coi như mất crop. Giữ lại, chỉ bỏ full nặng.
+    if (it->second.crop.empty() && now_s >= it->second.crop_pending_until_s) {
+      it = bank->by_plate.erase(it);  // không còn gì đáng giữ
+      continue;
+    }
+    it->second.full = JpegImage{};  // bỏ full nặng, giữ crop biển
+    ++it;
+  }
+}
+
+// Có nên chụp crop cho `key` ở frame này không — hỏi thẳng KHO ẢNH.
+// Chưa có ảnh và không có ảnh nào đang bay → chụp. Đã có ảnh → chỉ chụp khi
+// frame này chấm điểm cao hơn. Đang chờ ảnh về → không submit trùng.
+bool wantsBetterCrop(const std::map<uint64_t, TrackSnapshots>& banks, uint64_t track_id,
+                     const std::string& key, const business::plate::CropScore& cand,
+                     double now_s) {
+  if (!cand.valid()) return false;
+  auto bank_it = banks.find(track_id);
+  if (bank_it == banks.end()) return true;
+  auto it = bank_it->second.by_plate.find(key);
+  if (it == bank_it->second.by_plate.end()) return true;
+  // Chưa có ảnh: chụp, trừ khi lần submit trước còn trong hạn chờ.
+  if (it->second.crop.empty()) return now_s >= it->second.crop_pending_until_s;
+  return business::plate::cropScoreBetter(cand, it->second.crop_score);
 }
 
 void pruneSnapshotBanks(std::map<uint64_t, TrackSnapshots>* banks) {
@@ -139,14 +179,33 @@ bool pickSnapshotImages(const TrackSnapshots& bank, const std::string& key, Jpeg
   if (!key.empty() && try_key(key)) return true;
   for (const auto& kv : bank.by_plate) {
     if (kv.first.empty() || kv.first == business::plate::kEmptyPlate) continue;
-    if (kv.first == kWrongLaneSnapshotKey) continue;
+    if (isProtectedSnapshotKey(kv.first)) continue;
     if (try_key(kv.first)) return true;
   }
   for (const auto& kv : bank.by_plate) {
-    if (kv.first == kWrongLaneSnapshotKey) continue;
+    if (isProtectedSnapshotKey(kv.first)) continue;
     if (try_key(kv.first)) return true;
   }
   return false;
+}
+
+// Crop dự phòng khi mẫu ảnh phương tiện được chọn không kèm crop.
+// `plate` là chuỗi ĐÃ CHỐT: ưu tiên tuyệt đối crop của chính chuỗi đó để ảnh
+// biển và kết quả nhận diện luôn khớp nhau. Chỉ khi chuỗi đã chốt không có crop
+// nào mới đành lấy crop khác (tốt hơn là gửi event không có ảnh biển).
+const JpegImage* fallbackCrop(const TrackSnapshots& bank, const std::string& plate,
+                              bool* exact_match) {
+  *exact_match = false;
+  auto it = bank.by_plate.find(plate);
+  if (it != bank.by_plate.end() && !it->second.crop.empty()) {
+    *exact_match = true;
+    return &it->second.crop;
+  }
+  for (const auto& kv : bank.by_plate) {
+    if (isProtectedSnapshotKey(kv.first)) continue;
+    if (!kv.second.crop.empty()) return &kv.second.crop;
+  }
+  return nullptr;
 }
 
 // RSS hiện tại (MB) — để đối chiếu số container với RAM thật trong cùng một dòng log.
@@ -184,13 +243,22 @@ PlateProbe::~PlateProbe() {
   }
 }
 
+std::unique_ptr<business::plate::PlateRecognizer> PlateProbe::makeRecognizer() const {
+  auto mgr = std::make_unique<business::plate::PlateRecognizer>(config_.plate());
+  const WrongWayViolationConfig& ww = config_.violation().wrong_way;
+  mgr->setWrongWayTiming(ww.enabled ? ww.settle_s : 0.0,
+                         ww.enabled ? ww.wait_pair_s : 0.0);
+  mgr->setWrongWayMaxAngle(ww.max_angle_deg);
+  return mgr;
+}
+
 void PlateProbe::setCameras(const std::vector<Camera>& cameras) {
   std::lock_guard<std::mutex> lock(sources_mutex_);
   sources_.clear();
   for (size_t i = 0; i < cameras.size(); ++i) {
     auto state = std::make_unique<SourceState>();
     state->camera = cameras[i];
-    state->manager = std::make_unique<business::plate::PlateRecognizer>(config_.plate());
+    state->manager = makeRecognizer();
     sources_[static_cast<unsigned int>(i)] = std::move(state);
   }
 }
@@ -200,7 +268,7 @@ void PlateProbe::bindCamera(unsigned int source_id, const Camera& camera) {
   auto& slot = sources_[source_id];
   if (slot == nullptr) {
     slot = std::make_unique<SourceState>();
-    slot->manager = std::make_unique<business::plate::PlateRecognizer>(config_.plate());
+    slot->manager = makeRecognizer();
   }
   slot->camera = camera;
 }
@@ -221,7 +289,7 @@ void PlateProbe::updateCamera(unsigned int source_id, const Camera& camera) {
     // Chưa bind — tạo mới.
     auto state = std::make_unique<SourceState>();
     state->camera = camera;
-    state->manager = std::make_unique<business::plate::PlateRecognizer>(config_.plate());
+    state->manager = makeRecognizer();
     sources_[source_id] = std::move(state);
     return;
   }
@@ -385,6 +453,67 @@ std::vector<PlateProbe::LanePolygon> PlateProbe::lanePolygonsFor(
     lanes.push_back(std::move(lane));
   }
   return lanes;
+}
+
+std::vector<business::plate::WrongWayLine> PlateProbe::wrongWayLinesFor(
+    const std::string& camera_code, double frame_w, double frame_h, double source_w,
+    double source_h) {
+  ZoneSet set;
+  {
+    std::lock_guard<std::mutex> lock(zones_mutex_);
+    auto it = zones_.find(camera_code);
+    if (it == zones_.end()) return {};
+    set = it->second;
+  }
+
+  std::vector<business::plate::WrongWayLine> lines;
+  for (const Line& line : set.lines) {
+    if (!isReverseDirectionLine(line.name)) continue;
+    // Không có chiều đi đúng → không kết luận được ngược chiều.
+    if (!line.has_direction) {
+      warnLineWithoutDirection(camera_code, set, line.name);
+      continue;
+    }
+    if (line.points.size() < 2) continue;
+
+    business::plate::WrongWayLine out;
+    out.name = line.name;
+    if (line.normalized) {
+      out.a = {line.points[0].x * frame_w, line.points[0].y * frame_h};
+      out.b = {line.points[1].x * frame_w, line.points[1].y * frame_h};
+    } else {
+      const double sx = (source_w > 0.0) ? frame_w / source_w : 1.0;
+      const double sy = (source_h > 0.0) ? frame_h / source_h : 1.0;
+      out.a = {line.points[0].x * sx, line.points[0].y * sy};
+      out.b = {line.points[1].x * sx, line.points[1].y * sy};
+    }
+    // direction cùng hệ toạ độ với points → scale y như điểm (chỉ cần đúng dấu).
+    out.direction = {line.direction.x * frame_w, line.direction.y * frame_h};
+    lines.push_back(std::move(out));
+  }
+  return lines;
+}
+
+bool PlateProbe::hasWrongWayLine(const std::string& camera_code) {
+  std::lock_guard<std::mutex> lock(zones_mutex_);
+  auto it = zones_.find(camera_code);
+  if (it == zones_.end()) return false;
+  for (const Line& line : it->second.lines) {
+    if (isReverseDirectionLine(line.name) && line.has_direction) return true;
+  }
+  return false;
+}
+
+void PlateProbe::warnLineWithoutDirection(const std::string& camera_code, const ZoneSet& set,
+                                          const std::string& line_name) {
+  std::lock_guard<std::mutex> lock(zones_mutex_);
+  auto it = warned_line_version_.find(camera_code);
+  if (it != warned_line_version_.end() && it->second == set.version) return;
+  warned_line_version_[camera_code] = set.version;
+  LOG_WARN(
+      "zones[%s]: line '%s' thiếu direction_vector/has_direction — không xác định được "
+      "chiều đi đúng, bỏ qua vi phạm %s",
+      camera_code.c_str(), line_name.c_str(), business::violation::kWrongWay);
 }
 
 namespace {
@@ -662,6 +791,7 @@ GstPadProbeReturn PlateProbe::handleMeta(GstPadProbeInfo* info) {
   const ProbeConfig& probe_cfg = pipe.probe;
   const HelmetViolationConfig& helmet_cfg = config_.violation().helmet;
   const LaneViolationConfig& wrong_lane_cfg = config_.violation().wrong_lane;
+  const WrongWayViolationConfig& wrong_way_cfg = config_.violation().wrong_way;
   const double now_s = probe_start_s;
 
   NvBufSurface* surface = nullptr;
@@ -692,6 +822,10 @@ GstPadProbeReturn PlateProbe::handleMeta(GstPadProbeInfo* info) {
     const std::vector<std::vector<Point>>& polygons = plate_zones.polygons;
     const std::vector<LanePolygon> lane_polygons =
         lanePolygonsFor(state->camera.code, frame_w, frame_h, frame_w, frame_h);
+    const std::vector<business::plate::WrongWayLine> wrong_way_lines =
+        wrong_way_cfg.enabled
+            ? wrongWayLinesFor(state->camera.code, frame_w, frame_h, frame_w, frame_h)
+            : std::vector<business::plate::WrongWayLine>{};
 
     // Phân tầng metadata: xe (PGIE) → biển (SGIE1) → ký tự (SGIE2).
     std::vector<NvDsObjectMeta*> vehicles;
@@ -778,6 +912,27 @@ GstPadProbeReturn PlateProbe::handleMeta(GstPadProbeInfo* info) {
         }
       }
 
+      // WRONG_WAY: xe phải CHẠM line REVERSE_DIRECTION mới tính vi phạm.
+      // KHÔNG gate theo zone PLATE: phải cập nhật anchor ở MỌI frame thì mới có
+      // vị trí frame trước để so — nếu bỏ frame, đoạn di chuyển bị đứt và lần
+      // cắt vạch không được ghi nhận. Line cũng có thể nằm ngoài zone PLATE.
+      if (!wrong_way_lines.empty()) {
+        if (state->manager->observeWrongWay(track_id, anchor, wrong_way_lines, now_s) &&
+            state->manager->needsWrongWaySnapshot(track_id)) {
+          std::lock_guard<std::mutex> lock(pending_mutex_);
+          PendingEncode pend;
+          pend.track_id = track_id;
+          pend.plate_key = kWrongWaySnapshotKey;
+          pend.left = vehicle->rect_params.left;
+          pend.top = vehicle->rect_params.top;
+          pend.width = vehicle->rect_params.width;
+          pend.height = vehicle->rect_params.height;
+          pend.encode_plate_crop = false;
+          pending_frames_[{frame->source_id, frame->frame_num}].push_back(std::move(pend));
+          state->manager->markWrongWaySnapshotTaken(track_id);
+        }
+      }
+
       if (!in_zone) continue;
 
       // NO_HELMET chỉ áp dụng cho xe máy.
@@ -812,8 +967,11 @@ GstPadProbeReturn PlateProbe::handleMeta(GstPadProbeInfo* info) {
           const PlateReading reading = assemblePlateText(chars_it->second, options);
           if (!reading.chars.empty()) {
             const double area = box.width() * box.height();
-            ocr_status = state->manager->addOcrReading(track_id, reading.chars, reading.raw,
-                                                       now_s, meanCharConf(reading), area);
+            // area = bbox XE (ảnh phương tiện), plate_area = bbox BIỂN (crop).
+            const double plate_area = plate_box.width() * plate_box.height();
+            ocr_status =
+                state->manager->addOcrReading(track_id, reading.chars, reading.raw, now_s,
+                                              meanCharConf(reading), area, plate_area);
             snap_plate_key = utils::toUpper(reading.raw);
           }
         }
@@ -822,7 +980,13 @@ GstPadProbeReturn PlateProbe::handleMeta(GstPadProbeInfo* info) {
       const bool just_final = business::plate::plateOcrJustFinal(ocr_status);
       const bool better_snap = business::plate::plateOcrBetterSnapshot(ocr_status);
       const bool want_full = just_final || better_snap;
-      const bool want_plate = better_snap || just_final;
+      // Crop biển KHÔNG bám theo area xe: chụp khi biển đẹp hơn crop ĐANG CÓ
+      // trong kho ảnh của đúng chuỗi này. Hỏi thẳng kho — không qua sổ ghi ở
+      // TrackPlateState — để "đã chụp" luôn đồng nghĩa "ảnh có thật".
+      const bool want_plate =
+          business::plate::plateOcrAccepted(ocr_status) && !snap_plate_key.empty() &&
+          wantsBetterCrop(state->snapshots, track_id, snap_plate_key,
+                          state->manager->lastCropCandidate(track_id), now_s);
       if (want_full && !snap_plate_key.empty()) {
         std::lock_guard<std::mutex> lock(pending_mutex_);
         PendingEncode pend;
@@ -851,8 +1015,13 @@ GstPadProbeReturn PlateProbe::handleMeta(GstPadProbeInfo* info) {
           JpegImage image;
           image.data = std::move(warped_jpeg);
           TrackSnapshots& bank = state->snapshots[track_id];
-          bank.by_plate[snap_plate_key].crop = std::move(image);
-          retainSingleSnapshot(&bank, snap_plate_key);
+          // Crop lưu ĐÚNG dưới chuỗi biển đọc được ở frame này, kèm điểm chất
+          // lượng — lần sau so trực tiếp với ảnh đang giữ.
+          SnapshotImages& slot = bank.by_plate[snap_plate_key];
+          slot.crop = std::move(image);
+          slot.crop_score = state->manager->lastCropCandidate(track_id);
+          slot.crop_pending_until_s = 0.0;
+          retainSingleSnapshot(&bank, snap_plate_key, now_s);
           utils::latencyLog("track %lu jpeg_enc_plate_warp: %.1fms [%s%s]",
                             static_cast<unsigned long>(track_id), utils::msSince(enc_start_s),
                             better_snap ? "best" : "", just_final ? "final" : "");
@@ -864,6 +1033,11 @@ GstPadProbeReturn PlateProbe::handleMeta(GstPadProbeInfo* info) {
           obj_args.quality = kJpegQuality;
           nvds_obj_enc_process(enc_ctx_, &obj_args, surface, plate_it->second, frame);
           encode_requested = true;
+          // JPEG chỉ về ở image probe: giữ chỗ nhận ảnh + ghi sẵn điểm (probe đó
+          // không biết điểm), có hạn để encode fail vẫn được chụp lại.
+          SnapshotImages& slot = state->snapshots[track_id].by_plate[snap_plate_key];
+          slot.crop_score = state->manager->lastCropCandidate(track_id);
+          slot.crop_pending_until_s = now_s + kCropPendingTtlS;
           utils::latencyLog("track %lu jpeg_enc_plate: %.1fms [%s%s] (aabb-fallback)",
                             static_cast<unsigned long>(track_id), utils::msSince(enc_start_s),
                             better_snap ? "best" : "", just_final ? "final" : "");
@@ -904,6 +1078,8 @@ GstPadProbeReturn PlateProbe::handleMeta(GstPadProbeInfo* info) {
             obj_args.quality = kJpegQuality;
             nvds_obj_enc_process(enc_ctx_, &obj_args, surface, plate_it->second, frame);
             encode_requested = true;
+            state->snapshots[track_id].by_plate[key].crop_pending_until_s =
+                now_s + kCropPendingTtlS;
           }
         }
       }
@@ -960,6 +1136,7 @@ GstPadProbeReturn PlateProbe::handleImages(GstPadProbeInfo* info) {
 
   const double now_s = utils::monotonicSeconds();
   const int pgie_id = config_.pipeline().pgie.unique_id;
+  const WrongWayViolationConfig& wrong_way_cfg = config_.violation().wrong_way;
 
   // Track chờ full-frame theo (source, frame_num) — lấy trước khi encode.
   std::map<std::pair<unsigned int, uint64_t>, std::vector<PendingEncode>> waiting_by_frame;
@@ -1029,7 +1206,8 @@ GstPadProbeReturn PlateProbe::handleImages(GstPadProbeInfo* info) {
         for (const PendingEncode& pend : waiting) {
           TrackSnapshots& bank = state->snapshots[pend.track_id];
           storeFullSnapshot(&bank.by_plate[pend.plate_key], full_frame, pend);
-          if (pend.plate_key != kWrongLaneSnapshotKey) retainSingleSnapshot(&bank, pend.plate_key);
+          if (!isProtectedSnapshotKey(pend.plate_key))
+            retainSingleSnapshot(&bank, pend.plate_key, now_s);
         }
       }
     }
@@ -1044,9 +1222,9 @@ GstPadProbeReturn PlateProbe::handleImages(GstPadProbeInfo* info) {
       if (wait_it != waiting_by_frame.end()) {
         for (const PendingEncode& pend : wait_it->second) {
           if (pend.track_id != track_id) continue;
-          if (plate_key.empty() || plate_key == kWrongLaneSnapshotKey)
+          if (plate_key.empty() || isProtectedSnapshotKey(plate_key))
             plate_key = pend.plate_key;
-          if (plate_key != kWrongLaneSnapshotKey) break;
+          if (!isProtectedSnapshotKey(plate_key)) break;
         }
       }
       if (plate_key.empty()) continue;
@@ -1061,8 +1239,10 @@ GstPadProbeReturn PlateProbe::handleImages(GstPadProbeInfo* info) {
         if (enc == nullptr || enc->outBuffer == nullptr || enc->outLen == 0) continue;
         JpegImage image;
         image.data.assign(enc->outBuffer, enc->outBuffer + enc->outLen);
-        bank.by_plate[plate_key].crop = std::move(image);
-        if (plate_key != kWrongLaneSnapshotKey) retainSingleSnapshot(&bank, plate_key);
+        SnapshotImages& slot = bank.by_plate[plate_key];
+        slot.crop = std::move(image);
+        slot.crop_pending_until_s = 0.0;
+        if (!isProtectedSnapshotKey(plate_key)) retainSingleSnapshot(&bank, plate_key, now_s);
         break;
       }
     }
@@ -1070,6 +1250,9 @@ GstPadProbeReturn PlateProbe::handleImages(GstPadProbeInfo* info) {
 
     // Miss-finalize (xe biến mất / ngoài zone > 1s) rồi emit.
     state->manager->finalizeMissed(now_s);
+
+    // Cắt vạch rồi mà quá hạn vẫn không có biển số → bỏ track, không bắn event.
+    if (wrong_way_cfg.enabled) state->manager->dropStaleWrongWay(now_s);
 
     for (const business::plate::PendingEmit& pending : state->manager->collectReady(now_s)) {
       JpegImage full;
@@ -1088,6 +1271,35 @@ GstPadProbeReturn PlateProbe::handleImages(GstPadProbeInfo* info) {
                   static_cast<unsigned long>(pending.track_id), pending.snapshot_key.c_str());
         continue;
       }
+
+      // Mẫu ảnh phương tiện được chọn có thể không kèm crop → lấy crop của ĐÚNG
+      // chuỗi biển đã chốt (snapshot_key), để ảnh biển khớp kết quả nhận diện.
+      if (crop.empty()) {
+        bool exact = false;
+        const JpegImage* best = fallbackCrop(bank_it->second, pending.snapshot_key, &exact);
+        if (best != nullptr) {
+          crop = *best;
+          if (exact) {
+            LOG_DEBUG("track %lu: dùng crop của chuỗi đã chốt '%s'",
+                      static_cast<unsigned long>(pending.track_id),
+                      pending.snapshot_key.c_str());
+          } else {
+            LOG_WARN("track %lu: chuỗi chốt '%s' không có crop — dùng crop frame khác",
+                     static_cast<unsigned long>(pending.track_id),
+                     pending.snapshot_key.c_str());
+          }
+        }
+      }
+
+      // Event vi phạm ngược chiều BẮT BUỘC có đủ 2 ảnh: crop biển + full-frame.
+      // Thiếu ảnh → chờ frame sau (dropStaleWrongWay sẽ bỏ track nếu quá hạn).
+      if (pending.wrong_way_hits > 0 && (crop.empty() || full.empty())) {
+        LOG_DEBUG("track %lu: WRONG_WAY chờ đủ ảnh (crop=%zuB full=%zuB)",
+                  static_cast<unsigned long>(pending.track_id), crop.data.size(),
+                  full.data.size());
+        continue;
+      }
+
       if (!state->manager->commitEmit(pending.track_id, pending.plate)) continue;
 
       if (crop.empty()) {
@@ -1134,6 +1346,24 @@ GstPadProbeReturn PlateProbe::handleImages(GstPadProbeInfo* info) {
           job.emit.wrong_lane_crop = lane_it->second.crop;
         } else {
           LOG_WARN("track %lu: WRONG_LANE thiếu ảnh lúc vi phạm — dùng ảnh mặc định",
+                   static_cast<unsigned long>(pending.track_id));
+        }
+      }
+      job.emit.wrong_way_hits = pending.wrong_way_hits;
+      job.emit.wrong_way_line = pending.wrong_way_line;
+      if (pending.has_wrong_way_snapshot) {
+        auto way_it = bank_it->second.by_plate.find(kWrongWaySnapshotKey);
+        if (way_it != bank_it->second.by_plate.end() && !way_it->second.full.empty()) {
+          JpegImage way_full = way_it->second.full;
+          if (way_it->second.width >= 1.0f && way_it->second.height >= 1.0f) {
+            utils::drawGreenRectOnJpeg(&way_full.data, way_it->second.left,
+                                       way_it->second.top, way_it->second.width,
+                                       way_it->second.height);
+          }
+          job.emit.wrong_way_full = std::move(way_full);
+          job.emit.wrong_way_crop = way_it->second.crop;
+        } else {
+          LOG_WARN("track %lu: WRONG_WAY thiếu ảnh lúc vi phạm — dùng ảnh mặc định",
                    static_cast<unsigned long>(pending.track_id));
         }
       }
