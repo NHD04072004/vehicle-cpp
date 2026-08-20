@@ -270,65 +270,125 @@ bool PlateRecognizer::awaitingSnapshot(uint64_t track_id) const {
   return it->second.hasFinalPlate() && !it->second.isPushed() && !it->second.isPosted();
 }
 
-std::vector<PendingEmit> PlateRecognizer::collectReady(double now_s) {
-  std::vector<PendingEmit> ready;
-  std::lock_guard<std::mutex> lock(mutex_);
-  for (auto& entry : tracks_) {
-    TrackPlateState& state = entry.second;
-    if (!state.hasFinalPlate() || state.isPushed() || state.isPosted()) continue;
+EventKindMask PlateRecognizer::readyMaskLocked(TrackPlateState& state, double now_s) {
+  // Cổng CHUNG duy nhất: không có biển thì không nghiệp vụ nào xử phạt được.
+  if (!state.hasFinalPlate()) return 0;
 
-    // Có vi phạm ngược chiều → chờ settle sau khi đủ CẢ biển lẫn vi phạm, để gom
-    // nốt ảnh (crop biển + full-frame) của những frame cuối.
-    if (ww_settle_s_ > 0.0 && state.wrongWayHits() > 0) {
-      const double paired = state.wrongWayPairedAtS();
-      if (paired > 0.0 && now_s < paired + ww_settle_s_) continue;
+  const std::string& plate = state.emitPlate();  // đã normalize sẵn lúc chốt
+
+  // Biển bị send_mode chặn → không kind nào bắn được. Đây là quyết định chốt
+  // VĨNH VIỄN (không phải lỗi tạm), nên đánh dấu posted để thôi thử lại.
+  if (!shouldEmitPlate(plate, config_.send_mode)) {
+    if (!state.allSettled()) {
+      LOG_DEBUG("track %lu: '%s' bị send_mode=%d chặn — chốt mọi nghiệp vụ",
+                static_cast<unsigned long>(state.trackId()), plate.c_str(),
+                config_.send_mode);
+      state.markAllPosted();
     }
+    return 0;
+  }
 
-    auto attempt = last_attempt_s_.find(entry.first);
-    if (attempt != last_attempt_s_.end() && now_s - attempt->second < retry_interval_s_)
-      continue;
-    last_attempt_s_[entry.first] = now_s;
+  EventKindMask ready = 0;
+  for (size_t i = 0; i < kEventKindCount; ++i) {
+    const EventKind k = static_cast<EventKind>(i);
+    ViolationState& ks = state.kindMut(k);
 
-    const std::string plate = normalizePlateForEmit(state.plate(), config_.plate_style);
-    if (!shouldEmitPlate(plate, config_.send_mode)) {
-      LOG_DEBUG("track %lu: '%s' bị send_mode=%d chặn",
-                static_cast<unsigned long>(entry.first), plate.c_str(), config_.send_mode);
-      state.markPushed();
-      state.markPosted();
-      continue;
-    }
-    // Kind tạm cố định kPlate — tách per-kind ở commit ReadyEmit.
-    if (dedup_.alreadyEmitted(entry.first, plate, EventKind::kPlate, now_s)) {
-      LOG_DEBUG("track %lu: '%s' trùng dedup cache",
-                static_cast<unsigned long>(entry.first), plate.c_str());
-      state.markPushed();
-      state.markPosted();
+    // kPlate ăn theo hasFinalPlate; nghiệp vụ khác cần có hit.
+    if (k != EventKind::kPlate && ks.hits <= 0) continue;
+    if (ks.pushed || ks.posted) continue;
+
+    // CHỈ WRONG_WAY: chờ settle sau khi đủ cả biển lẫn vi phạm, để gom nốt ảnh
+    // của những frame cuối. Không chặn các nghiệp vụ khác.
+    if (k == EventKind::kWrongWay && ww_settle_s_ > 0.0 && ks.paired_at_s > 0.0 &&
+        now_s < ks.paired_at_s + ww_settle_s_) {
       continue;
     }
-    ready.push_back({entry.first, plate, state.votedCls(), state.bestSnapshotKey(),
-                     state.createdAtS(), state.firstOcrAtS(), state.finalAtS(),
-                     state.plateRecognizeCount(), state.noHelmetFrames(),
-                     state.noHelmetCount(), state.wrongLaneFrames(), state.wrongLaneZone(),
-                     state.hasWrongLaneSnapshot(), state.wrongWayHits(),
-                     state.wrongWayLine(), state.hasWrongWaySnapshot()});
+
+    // Retry throttle riêng từng nghiệp vụ.
+    if (ks.last_attempt_s > 0.0 && now_s - ks.last_attempt_s < retry_interval_s_) continue;
+
+    if (dedup_.alreadyEmitted(state.trackId(), plate, k, now_s)) {
+      LOG_DEBUG("track %lu: '%s' kind=%s trùng dedup cache",
+                static_cast<unsigned long>(state.trackId()), plate.c_str(),
+                eventKindName(k));
+      state.markPosted(k);  // chỉ chốt kind này, không đụng kind khác
+      continue;
+    }
+
+    ks.last_attempt_s = now_s;
+    ready |= static_cast<EventKindMask>(1u << i);
   }
   return ready;
 }
 
+void PlateRecognizer::collectReady(double now_s, std::vector<ReadyEmit>* out) {
+  if (out == nullptr) return;
+  out->clear();
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (auto& entry : tracks_) {
+    TrackPlateState& state = entry.second;
+    const EventKindMask ready = readyMaskLocked(state, now_s);
+    // Lọc TRƯỚC khi chạm string: track đang chờ ảnh không còn copy plate +
+    // snapshot_key mỗi frame như trước.
+    if (ready == 0) continue;
+
+    out->emplace_back();
+    ReadyEmit& re = out->back();
+    re.track_id = entry.first;
+    re.ready = ready;
+    re.plate = state.emitPlate();
+    re.snapshot_key = state.bestSnapshotKey();
+    re.vehicle_cls = state.votedCls();
+    re.created_at_s = state.createdAtS();
+    re.first_ocr_at_s = state.firstOcrAtS();
+    re.final_at_s = state.finalAtS();
+    re.recognize_count = state.plateRecognizeCount();
+    for (size_t i = 0; i < kEventKindCount; ++i) {
+      if ((ready & (1u << i)) == 0) continue;  // chỉ copy kind đang sẵn sàng
+      const ViolationState& ks = state.kind(static_cast<EventKind>(i));
+      re.payload[i] = KindPayload{ks.hits, ks.detail, ks.has_snapshot};
+      re.labels[i] = state.kindLabel(static_cast<EventKind>(i));
+    }
+  }
+}
+
 bool PlateRecognizer::commitEmit(uint64_t track_id, const std::string& plate,
-                                 double now_s) {
+                                 EventKindMask kinds, double now_s) {
+  if (kinds == 0) return false;
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = tracks_.find(track_id);
   if (it == tracks_.end()) return false;
-  if (!dedup_.tryEmit(track_id, plate, EventKind::kPlate, now_s)) return false;
-  it->second.markPushed();
-  return true;
+
+  EventKindMask committed = 0;
+  for (size_t i = 0; i < kEventKindCount; ++i) {
+    const EventKind k = static_cast<EventKind>(i);
+    if (!maskHas(kinds, k)) continue;
+    if (!dedup_.tryEmit(track_id, plate, k, now_s)) continue;
+    it->second.markPushed(k);
+    committed |= kindBit(k);
+  }
+  return committed != 0;
 }
 
-void PlateRecognizer::markPosted(uint64_t track_id) {
+void PlateRecognizer::settleKinds(uint64_t track_id, EventKindMask want,
+                                  EventKindMask done) {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = tracks_.find(track_id);
-  if (it != tracks_.end()) it->second.markPosted();
+  if (it == tracks_.end()) return;
+  TrackPlateState& state = it->second;
+  const std::string& plate = state.emitPlate();
+  for (size_t i = 0; i < kEventKindCount; ++i) {
+    const EventKind k = static_cast<EventKind>(i);
+    if (!maskHas(want, k)) continue;
+    if (maskHas(done, k)) {
+      state.markPosted(k);
+      continue;
+    }
+    // Lỗi tạm: mở lại cờ pushed VÀ gỡ khoá dedup, nếu không lần retry sau sẽ bị
+    // chính dedup chặn (cache được ghi lúc commitEmit, trước khi publish).
+    state.unmarkPushed(k);
+    dedup_.forget(track_id, plate, k);
+  }
 }
 
 size_t PlateRecognizer::cleanup(double now_s) {
@@ -336,7 +396,6 @@ size_t PlateRecognizer::cleanup(double now_s) {
   size_t removed = 0;
   for (auto it = tracks_.begin(); it != tracks_.end();) {
     if (it->second.shouldForceDelete(now_s)) {
-      last_attempt_s_.erase(it->first);
       it = tracks_.erase(it);
       ++removed;
     } else {

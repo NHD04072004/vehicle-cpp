@@ -88,6 +88,8 @@ class PlateProbe {
     Camera camera;
     PlateEmit emit;
     business::plate::PlateRecognizer* manager = nullptr;
+    // Nghiệp vụ mà job này đang bắn — worker báo lại kết quả theo đúng tập đó.
+    business::plate::EventKindMask want = 0;
   };
 
   static GstPadProbeReturn bboxProbeCb(GstPad* pad, GstPadProbeInfo* info, gpointer data);
@@ -162,6 +164,9 @@ class PlateProbe {
   std::thread worker_;
   double last_cleanup_s_ = 0.0;
   double last_mem_stats_s_ = 0.0;
+  // Buffer tái dùng cho collectReady — chỉ handleImages đụng tới (một thread),
+  // tránh cấp phát vector mới mỗi buffer.
+  std::vector<business::plate::ReadyEmit> ready_buf_;
 };
 
 }  // namespace probes

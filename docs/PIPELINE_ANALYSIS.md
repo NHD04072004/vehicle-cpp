@@ -1904,3 +1904,90 @@ Test tái hiện đúng kịch bản production (xe cắt vạch, có biển, kh
 
 > Lưu ý: đây mới là **nửa sau** của B1. Nửa đầu — `plate_probe.cpp` còn `continue` chặn cả
 > track khi thiếu ảnh — được sửa ở commit B1 dứt điểm sau khi `collectReady` tách theo kind.
+
+---
+
+## Commit 4+5 — `ReadyEmit` per-kind và **B1 dứt điểm**
+
+Nửa đầu của B1. `PendingEmit` gộp 17 field của cả 4 nghiệp vụ, và `collectReady` có 5 cổng
+`continue` dùng chung cờ `is_pushed_`/`is_posted_`. Hệ quả: thiếu ảnh WRONG_WAY thì
+`continue` bỏ qua **toàn bộ** phần dựng `EmitJob`, mất luôn 3 event kia.
+
+```mermaid
+flowchart TD
+    CR["collectReady(now_s, &ready_buf_)"]
+
+    subgraph GATE["🔵 readyMaskLocked — phân loại 5 cổng cũ"]
+        direction TB
+        C0{"🟢 <b>hasFinalPlate()</b><br/>cổng CHUNG duy nhất còn lại<br/><i>không biển → không xử phạt được</i>"}
+        C1{"🟢 <b>shouldEmitPlate</b><br/>CHUNG — biển xấu thì mọi kind chịu<br/>🔵 markAllPosted() có chủ đích"}
+        C2["🔵 <b>PER-KIND</b>: pushed ‖ posted"]
+        C3["🔵 <b>PER-KIND</b>: settle — CHỈ kWrongWay"]
+        C4["🔵 <b>PER-KIND</b>: retry throttle<br/><i>ks.last_attempt_s thay map phụ</i>"]
+        C5["🔵 <b>PER-KIND</b>: dedup (track, plate, <b>kind</b>)<br/>trùng → markPosted(k) RIÊNG kind đó"]
+        C0 --> C1 --> C2 --> C3 --> C4 --> C5
+    end
+
+    CR --> GATE
+    MASK["🔵 <b>ready_mask</b> (bitmask 4 bit)"]
+    GATE --> MASK
+
+    Z{"🔵 ready_mask == 0?"}
+    MASK --> Z
+    SKIP["🔵 <b>bỏ qua, KHÔNG copy string</b><br/><i>trước đây mọi track chờ ảnh vẫn copy<br/>4 std::string MỖI FRAME</i>"]
+    Z -->|"có"| SKIP
+
+    RE["🔵 <b>ReadyEmit</b> — 1 phần tử/track<br/>ready_mask + payload[4] + labels[4]<br/><i>1 track = 1 lần tra kho ảnh = 1 EmitJob<br/>→ số job KHÔNG tăng, kMaxEmitQueue an toàn</i>"]
+    Z -->|"không"| RE
+
+    IMG{"🔵 kWrongWay ∈ want<br/>&& (crop ‖ full rỗng)?"}
+    RE --> IMG
+
+    DROPBIT["🔵 <b>want &= ~kindBit(kWrongWay)</b><br/>chỉ GỠ BIT ngược chiều<br/>💚 <b>3 nghiệp vụ kia VẪN BẮN</b>"]
+    IMG -->|"thiếu ảnh"| DROPBIT
+    IMG -->|"đủ ảnh"| COMMIT
+
+    DROPBIT --> W{"want == 0?"}
+    W -->|"có"| WAIT["chờ frame sau"]
+    W -->|"không"| COMMIT
+
+    COMMIT["🔵 <b>commitEmit(track, plate, want)</b><br/>dedup + markPushed theo TỪNG kind"]
+    JOB["🔵 EmitJob{want}<br/>chỉ điền số liệu của kind đang bắn<br/>🔵 <b>KHÔNG snapshots.erase()</b><br/><i>kind chưa bắn còn cần kho ảnh</i>"]
+    SET["🔵 <b>settleKinds(track, want, done)</b><br/>done → markPosted(k)<br/>lỗi tạm → unmarkPushed(k) + dedup.forget(k)"]
+
+    COMMIT --> JOB --> SET
+
+    style C0 fill:#d4f4d4
+    style C1 fill:#d4f4d4
+    style C2 fill:#cce5ff
+    style C3 fill:#cce5ff
+    style C4 fill:#cce5ff
+    style C5 fill:#cce5ff
+    style MASK fill:#cce5ff
+    style SKIP fill:#cce5ff
+    style RE fill:#cce5ff
+    style IMG fill:#cce5ff
+    style DROPBIT fill:#d4f4d4
+    style COMMIT fill:#cce5ff
+    style JOB fill:#cce5ff
+    style SET fill:#cce5ff
+```
+
+**Ba thay đổi quan trọng ngoài B1:**
+
+1. **Bỏ `snapshots.erase(track_id)`** (`plate_probe.cpp:1373` cũ). Với mô hình per-kind, mỗi
+   kind có thể emit ở frame khác nhau, nên xoá kho ảnh ngay sau job đầu tiên sẽ giết ảnh của
+   kind chưa bắn. `pruneOrphanSnapshots` (1s/lần) dọn theo `hasTrack`, mà track chỉ bị xoá
+   khi `allSettled()` — kho ảnh sống đúng bằng vòng đời track.
+
+2. **Xoá `last_attempt_s_`** — map thứ hai song song `tracks_`, phải erase thủ công ở
+   `cleanup`. Nay `ViolationState::last_attempt_s` cho retry throttle **riêng từng nghiệp
+   vụ**, đúng ngữ nghĩa hơn và bớt một cây.
+
+3. **Giảm copy string**: lọc `ready_mask == 0` **trước** khi chạm string. Trước đây mọi track
+   đã chốt biển và chưa posted đều copy 4 `std::string` mỗi frame suốt thời gian chờ ảnh
+   (có thể vài chục frame). Cộng với `emitPlate()` cache và buffer `ready_buf_` tái dùng →
+   gần như không cấp phát trong vòng emit.
+
+**Test**: 107/107 pass. Ba case chứng minh trực tiếp mô hình mới — chốt riêng WRONG_LANE thì
+PLATE/NO_HELMET vẫn sẵn sàng; publish fail thì `settleKinds` gỡ khoá dedup để retry được.

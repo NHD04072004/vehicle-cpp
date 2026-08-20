@@ -1,6 +1,7 @@
 // Quản lý vòng đời track + cổng emit cho 1 camera (PIPELINE.md §5).
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <map>
 #include <mutex>
@@ -23,23 +24,33 @@ struct WrongWayLine {
   std::string name;
 };
 
-struct PendingEmit {
+// Số liệu của MỘT nghiệp vụ tại thời điểm sẵn sàng emit. Không giữ string —
+// nhãn nằm ở ReadyEmit::labels để struct này POD.
+struct KindPayload {
+  int hits = 0;
+  int detail = 0;  // kNoHelmet: số người không mũ tối đa
+  bool has_snapshot = false;
+};
+
+// Một track có ÍT NHẤT một nghiệp vụ sẵn sàng emit ở frame này.
+//
+// Giữ 1 phần tử/track (không phải 1/kind) để mỗi track vẫn chỉ tra kho ảnh một
+// lần và dựng đúng một EmitJob — số job không tăng, nên kMaxEmitQueue không bị
+// đầy sớm hơn hiện tại. Phần tách theo nghiệp vụ nằm ở `ready` + `payload`.
+struct ReadyEmit {
   uint64_t track_id = 0;
-  std::string plate;     // đã normalize
-  int vehicle_cls = -1;
+  EventKindMask ready = 0;  // bit nào set = kind đó sẵn sàng NGAY frame này
+  // --- dùng chung mọi kind, chỉ copy 1 lần/track/frame ---
+  std::string plate;         // đã normalize
   std::string snapshot_key;  // chuỗi biển của mẫu ảnh đẹp nhất
+  int vehicle_cls = -1;
   double created_at_s = 0.0;
   double first_ocr_at_s = 0.0;
   double final_at_s = 0.0;
   int recognize_count = 0;
-  int no_helmet_frames = 0;
-  int no_helmet_count = 0;
-  int wrong_lane_frames = 0;
-  std::string wrong_lane_zone;
-  bool has_wrong_lane_snapshot = false;
-  int wrong_way_hits = 0;
-  std::string wrong_way_line;
-  bool has_wrong_way_snapshot = false;
+  // --- riêng từng nghiệp vụ ---
+  std::array<KindPayload, kEventKindCount> payload{};
+  std::array<std::string, kEventKindCount> labels{};  // zone LANE / line REVERSE
 };
 
 class PlateRecognizer {
@@ -93,19 +104,27 @@ class PlateRecognizer {
   // Đã chốt biển, chưa emit — cần (hoặc đang chờ) snapshot vehicle.
   bool awaitingSnapshot(uint64_t track_id) const;
 
-  std::vector<PendingEmit> collectReady(double now_s);
-  bool commitEmit(uint64_t track_id, const std::string& plate, double now_s = 0.0);
-  void markPosted(uint64_t track_id);
+  // Track có ít nhất 1 nghiệp vụ sẵn sàng emit. `out` là buffer tái dùng của
+  // caller (clear rồi ghi đè) → không cấp phát vector mỗi frame.
+  void collectReady(double now_s, std::vector<ReadyEmit>* out);
+  // Ghi dedup + đánh dấu pushed cho ĐÚNG các kind trong `kinds`.
+  bool commitEmit(uint64_t track_id, const std::string& plate, EventKindMask kinds,
+                  double now_s = 0.0);
+  // done: kind đã publish xong (hoặc bị chặn vĩnh viễn) → posted.
+  // want & ~done: lỗi tạm → gỡ cờ pushed và gỡ khoá dedup để retry.
+  void settleKinds(uint64_t track_id, EventKindMask want, EventKindMask done);
   size_t cleanup(double now_s);
 
   size_t trackCount() const;
   bool hasTrack(uint64_t track_id) const;
 
  private:
+  // Bitmask kind sẵn sàng emit ngay frame này; 0 = chưa có gì. Gọi trong lock.
+  EventKindMask readyMaskLocked(TrackPlateState& state, double now_s);
+
   mutable std::mutex mutex_;
   PlateConfig config_;
   std::map<uint64_t, TrackPlateState> tracks_;
-  std::map<uint64_t, double> last_attempt_s_;
   DedupCache dedup_;
   double retry_interval_s_ = 1.0;
   double ww_settle_s_ = 0.0;     // chờ sau khi đủ cả biển + vi phạm

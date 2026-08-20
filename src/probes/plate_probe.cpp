@@ -1254,7 +1254,8 @@ GstPadProbeReturn PlateProbe::handleImages(GstPadProbeInfo* info) {
     // Cắt vạch rồi mà quá hạn vẫn không có biển số → bỏ track, không bắn event.
     if (wrong_way_cfg.enabled) state->manager->clearStaleWrongWay(now_s);
 
-    for (const business::plate::PendingEmit& pending : state->manager->collectReady(now_s)) {
+    state->manager->collectReady(now_s, &ready_buf_);
+    for (const business::plate::ReadyEmit& pending : ready_buf_) {
       JpegImage full;
       JpegImage crop;
       float left = 0.0f;
@@ -1291,16 +1292,25 @@ GstPadProbeReturn PlateProbe::handleImages(GstPadProbeInfo* info) {
         }
       }
 
+      using business::plate::EventKind;
+      business::plate::EventKindMask want = pending.ready;
+
       // Event vi phạm ngược chiều BẮT BUỘC có đủ 2 ảnh: crop biển + full-frame.
-      // Thiếu ảnh → chờ frame sau (dropStaleWrongWay sẽ bỏ track nếu quá hạn).
-      if (pending.wrong_way_hits > 0 && (crop.empty() || full.empty())) {
-        LOG_DEBUG("track %lu: WRONG_WAY chờ đủ ảnh (crop=%zuB full=%zuB)",
+      // Thiếu ảnh → chỉ HOÃN RIÊNG vế WRONG_WAY; PLATE/NO_HELMET/WRONG_LANE vẫn
+      // bắn được vì chúng không cần crop biển của nghiệp vụ này.
+      if (business::plate::maskHas(want, EventKind::kWrongWay) &&
+          (crop.empty() || full.empty())) {
+        LOG_DEBUG("track %lu: WRONG_WAY hoãn chờ đủ ảnh (crop=%zuB full=%zuB) — "
+                  "các nghiệp vụ khác vẫn bắn",
                   static_cast<unsigned long>(pending.track_id), crop.data.size(),
                   full.data.size());
-        continue;
+        want &= static_cast<business::plate::EventKindMask>(
+            ~business::plate::kindBit(EventKind::kWrongWay));
       }
+      if (want == 0) continue;  // không còn nghiệp vụ nào → chờ frame sau
 
-      if (!state->manager->commitEmit(pending.track_id, pending.plate, now_s)) continue;
+      if (!state->manager->commitEmit(pending.track_id, pending.plate, want, now_s))
+        continue;
 
       if (crop.empty()) {
         LOG_WARN("track %lu: event '%s' không có crop biển (key='%s', %d reading)",
@@ -1319,9 +1329,17 @@ GstPadProbeReturn PlateProbe::handleImages(GstPadProbeInfo* info) {
                  static_cast<unsigned long>(pending.track_id));
       }
 
+      const business::plate::KindPayload& helmet_pl =
+          pending.payload[business::plate::kindIndex(EventKind::kNoHelmet)];
+      const business::plate::KindPayload& lane_pl =
+          pending.payload[business::plate::kindIndex(EventKind::kWrongLane)];
+      const business::plate::KindPayload& way_pl =
+          pending.payload[business::plate::kindIndex(EventKind::kWrongWay)];
+
       EmitJob job;
       job.camera = state->camera;
       job.manager = state->manager.get();
+      job.want = want;
       job.emit.track_id = pending.track_id;
       job.emit.plate = pending.plate;
       job.emit.vehicle_cls = pending.vehicle_cls;
@@ -1329,11 +1347,18 @@ GstPadProbeReturn PlateProbe::handleImages(GstPadProbeInfo* info) {
       job.emit.first_ocr_at_s = pending.first_ocr_at_s;
       job.emit.final_at_s = pending.final_at_s;
       job.emit.recognize_count = pending.recognize_count;
-      job.emit.no_helmet_frames = pending.no_helmet_frames;
-      job.emit.no_helmet_count = pending.no_helmet_count;
-      job.emit.wrong_lane_frames = pending.wrong_lane_frames;
-      job.emit.wrong_lane_zone = pending.wrong_lane_zone;
-      if (pending.has_wrong_lane_snapshot) {
+      // Chỉ điền số liệu của nghiệp vụ đang thực sự bắn lần này; kind bị hoãn
+      // để 0 nên publisher không bắn nhầm.
+      if (business::plate::maskHas(want, EventKind::kNoHelmet)) {
+        job.emit.no_helmet_frames = helmet_pl.hits;
+        job.emit.no_helmet_count = helmet_pl.detail;
+      }
+      if (business::plate::maskHas(want, EventKind::kWrongLane)) {
+        job.emit.wrong_lane_frames = lane_pl.hits;
+        job.emit.wrong_lane_zone =
+            pending.labels[business::plate::kindIndex(EventKind::kWrongLane)];
+      }
+      if (business::plate::maskHas(want, EventKind::kWrongLane) && lane_pl.has_snapshot) {
         auto lane_it = bank_it->second.by_plate.find(kWrongLaneSnapshotKey);
         if (lane_it != bank_it->second.by_plate.end() && !lane_it->second.full.empty()) {
           JpegImage lane_full = lane_it->second.full;
@@ -1349,9 +1374,12 @@ GstPadProbeReturn PlateProbe::handleImages(GstPadProbeInfo* info) {
                    static_cast<unsigned long>(pending.track_id));
         }
       }
-      job.emit.wrong_way_hits = pending.wrong_way_hits;
-      job.emit.wrong_way_line = pending.wrong_way_line;
-      if (pending.has_wrong_way_snapshot) {
+      if (business::plate::maskHas(want, EventKind::kWrongWay)) {
+        job.emit.wrong_way_hits = way_pl.hits;
+        job.emit.wrong_way_line =
+            pending.labels[business::plate::kindIndex(EventKind::kWrongWay)];
+      }
+      if (business::plate::maskHas(want, EventKind::kWrongWay) && way_pl.has_snapshot) {
         auto way_it = bank_it->second.by_plate.find(kWrongWaySnapshotKey);
         if (way_it != bank_it->second.by_plate.end() && !way_it->second.full.empty()) {
           JpegImage way_full = way_it->second.full;
@@ -1370,7 +1398,9 @@ GstPadProbeReturn PlateProbe::handleImages(GstPadProbeInfo* info) {
       job.emit.images_ready_at_s = now_s;
       job.emit.full_frame = std::move(full);
       job.emit.plate_crop = std::move(crop);
-      state->snapshots.erase(pending.track_id);
+      // KHÔNG xoá kho ảnh ở đây: track có thể còn nghiệp vụ chưa bắn (WRONG_WAY
+      // đang chờ ảnh) và sẽ cần lại chính kho này. pruneOrphanSnapshots (1s/lần)
+      // dọn theo hasTrack, mà track chỉ bị xoá khi mọi nghiệp vụ đã chốt.
       utils::latencyLog(
           "track %lu images_ready: final→images=%.0fms full=%zuB plate=%zuB key='%s'",
           static_cast<unsigned long>(pending.track_id),
@@ -1492,8 +1522,11 @@ void PlateProbe::workerLoop() {
                       (job.emit.enqueue_at_s > 0.0)
                           ? (worker_start_s - job.emit.enqueue_at_s) * 1000.0
                           : 0.0);
-    if (publisher_->publishPlateEvent(job.camera, job.emit) && job.manager != nullptr)
-      job.manager->markPosted(job.emit.track_id);
+    // publishPlateEvent còn trả bool gộp — tách thành mask per-kind ở commit
+    // retry per-kind. Tạm coi cả cụm want là cùng thành/bại.
+    const bool ok = publisher_->publishPlateEvent(job.camera, job.emit);
+    if (job.manager != nullptr)
+      job.manager->settleKinds(job.emit.track_id, job.want, ok ? job.want : 0);
     utils::latencyLog("track %lu worker_total: %.0fms",
                       static_cast<unsigned long>(job.emit.track_id),
                       utils::msSince(worker_start_s));

@@ -409,19 +409,81 @@ void testCollectReady() {
     rec.addOcrReading(track, makeChars("14A12345"), "14A12345", 1.0 + i, 0.9, 100.0, 40.0);
   }
 
-  const std::vector<p::PendingEmit> ready = rec.collectReady(5.0);
+  std::vector<p::ReadyEmit> ready;
+  rec.collectReady(5.0, &ready);
   checkEqInt(static_cast<long long>(ready.size()), 1, "collectReady trả đúng 1 track");
   if (!ready.empty()) {
     checkEqInt(static_cast<long long>(ready[0].track_id), static_cast<long long>(track),
                "collectReady: track_id đúng");
     checkEq(ready[0].plate, "14A12345", "collectReady: biển đã normalize");
+    check(p::maskHas(ready[0].ready, p::EventKind::kPlate),
+          "collectReady: kPlate sẵn sàng");
+    check(!p::maskHas(ready[0].ready, p::EventKind::kWrongWay),
+          "collectReady: không có vi phạm thì kWrongWay không sẵn sàng");
   }
 
-  // Chưa commit thì lần gọi sau vẫn trả lại (retry throttle cho phép).
-  rec.commitEmit(track, "14A12345", 5.0);
-  const std::vector<p::PendingEmit> after = rec.collectReady(6.0);
-  checkEqInt(static_cast<long long>(after.size()), 0,
+  rec.commitEmit(track, "14A12345", p::kindBit(p::EventKind::kPlate), 5.0);
+  rec.collectReady(6.0, &ready);
+  checkEqInt(static_cast<long long>(ready.size()), 0,
              "sau commitEmit: track không còn trong collectReady");
+}
+
+// ---------------------------------------------------------------------------
+// Tách nghiệp vụ: mỗi kind sẵn sàng/chốt độc lập
+// ---------------------------------------------------------------------------
+void testPerKindEmit() {
+  std::printf("== emit per-kind ==\n");
+  namespace p = vehicle::business::plate;
+  using p::EventKind;
+
+  vehicle::PlateConfig cfg;
+  cfg.max_recognize_times = 2;
+  cfg.send_mode = 2;
+  p::PlateRecognizer rec(cfg);
+
+  const uint64_t track = 300;
+  rec.observeVehicle(track, 2, 0.9, /*in_zone=*/true, 1.0);
+  rec.observeHelmet(track, 1);
+  rec.observeLane(track, "CAR_TRUCK_LANE");
+  rec.addOcrReading(track, makeChars("14A12345"), "14A12345", 1.0, 0.9, 100.0, 40.0);
+  rec.addOcrReading(track, makeChars("14A12345"), "14A12345", 2.0, 0.9, 100.0, 40.0);
+
+  std::vector<p::ReadyEmit> ready;
+  rec.collectReady(5.0, &ready);
+  checkEqInt(static_cast<long long>(ready.size()), 1, "per-kind: 1 track sẵn sàng");
+  if (!ready.empty()) {
+    const p::ReadyEmit& re = ready[0];
+    check(p::maskHas(re.ready, EventKind::kPlate), "per-kind: PLATE sẵn sàng");
+    check(p::maskHas(re.ready, EventKind::kNoHelmet), "per-kind: NO_HELMET sẵn sàng");
+    check(p::maskHas(re.ready, EventKind::kWrongLane), "per-kind: WRONG_LANE sẵn sàng");
+    checkEq(re.labels[p::kindIndex(EventKind::kWrongLane)], "CAR_TRUCK_LANE",
+            "per-kind: nhãn zone của WRONG_LANE");
+    checkEqInt(re.payload[p::kindIndex(EventKind::kNoHelmet)].hits, 1,
+               "per-kind: hits của NO_HELMET");
+  }
+
+  // Chốt riêng WRONG_LANE — hai kind kia phải còn sẵn sàng.
+  rec.commitEmit(track, "14A12345", p::kindBit(EventKind::kWrongLane), 5.0);
+  rec.settleKinds(track, p::kindBit(EventKind::kWrongLane),
+                  p::kindBit(EventKind::kWrongLane));
+  rec.collectReady(7.0, &ready);
+  checkEqInt(static_cast<long long>(ready.size()), 1,
+             "per-kind: track vẫn sẵn sàng sau khi chốt 1 nghiệp vụ");
+  if (!ready.empty()) {
+    check(!p::maskHas(ready[0].ready, EventKind::kWrongLane),
+          "per-kind: WRONG_LANE đã chốt, không bắn lại");
+    check(p::maskHas(ready[0].ready, EventKind::kPlate),
+          "per-kind: PLATE vẫn chờ bắn");
+    check(p::maskHas(ready[0].ready, EventKind::kNoHelmet),
+          "per-kind: NO_HELMET vẫn chờ bắn");
+  }
+
+  // Publish thất bại → settleKinds mở lại cờ và gỡ dedup để retry.
+  rec.commitEmit(track, "14A12345", p::kindBit(EventKind::kPlate), 7.0);
+  rec.settleKinds(track, p::kindBit(EventKind::kPlate), /*done=*/0);
+  rec.collectReady(9.0, &ready);
+  check(!ready.empty() && p::maskHas(ready[0].ready, EventKind::kPlate),
+        "per-kind: publish fail → PLATE retry được (dedup đã gỡ khoá)");
 }
 
 // ---------------------------------------------------------------------------
@@ -470,12 +532,14 @@ void testClearStaleWrongWay() {
              "quá wait_pair_s: bỏ đúng 1 vế WRONG_WAY");
 
   // Điểm mấu chốt của B1: track PHẢI còn sống và bắn được event PLATE.
-  const std::vector<p::PendingEmit> ready = rec.collectReady(8.0);
+  std::vector<p::ReadyEmit> ready;
+  rec.collectReady(8.0, &ready);
   checkEqInt(static_cast<long long>(ready.size()), 1,
              "sau khi bỏ vế WRONG_WAY: track vẫn bắn được PLATE");
   if (!ready.empty()) {
-    checkEqInt(static_cast<long long>(ready[0].wrong_way_hits), 0,
-               "vế WRONG_WAY đã sạch, không bắn nhầm");
+    check(p::maskHas(ready[0].ready, p::EventKind::kPlate), "PLATE sẵn sàng bắn");
+    check(!p::maskHas(ready[0].ready, p::EventKind::kWrongWay),
+          "vế WRONG_WAY đã sạch, không bắn nhầm");
     checkEq(ready[0].plate, "14A12345", "biển vẫn nguyên vẹn");
   }
 }
@@ -490,6 +554,7 @@ int main() {
   testKindLifecycle();
   testMotion();
   testCollectReady();
+  testPerKindEmit();
   testClearStaleWrongWay();
 
   std::printf("\n%d/%d case pass", g_total - g_failed, g_total);
