@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "business/plate/event.h"
+#include "business/plate/rules.h"  // EventKind / EventKindMask
 #include "business/violation/config_store.h"
 #include "common/config.h"
 #include "common/types.h"
@@ -25,15 +26,34 @@ class EventPublisher {
 
   void publishBbox(const std::string& camera_code, const std::vector<Detection>& detections);
 
-  bool publishPlateEvent(const Camera& camera, const PlateEmit& emit);
+  // Trả về mask các nghiệp vụ đã XONG: publish thành công, hoặc bị chặn vĩnh
+  // viễn bởi config/VMS. Kind lỗi TẠM (upload/MQTT hỏng) không nằm trong mask
+  // → caller retry riêng nó, không bắn lại kind đã thành công.
+  business::plate::EventKindMask publishPlateEvent(const Camera& camera,
+                                                   const PlateEmit& emit);
 
  private:
+  // Ba trạng thái, không phải hai. Gộp "không đủ điều kiện" với "lỗi tạm" vào
+  // một bool chính là nguồn gốc bug retry: 1 violation lỗi làm cả track bị thử
+  // lại, bắn trùng những cái đã publish xong.
+  enum class PublishOutcome {
+    kOk,       // đã publish
+    kSkipped,  // min_hits chưa đủ / VMS chưa bật mã → coi như xong, KHÔNG retry
+    kRetry,    // lỗi tạm (upload/MQTT) → lần sau thử lại
+  };
+
   bool canPublishNoHelmet(const Camera& camera, const PlateEmit& emit) const;
   bool canPublishWrongLane(const Camera& camera, const PlateEmit& emit) const;
   bool canPublishWrongWay(const Camera& camera, const PlateEmit& emit) const;
 
-  bool publishViolations(const Camera& camera, const PlateEmit& emit,
-                         const business::plate::EventParams& params);
+  // Publish 1 nghiệp vụ vi phạm theo kind. Trả trạng thái để caller gom mask.
+  PublishOutcome publishViolationKind(const Camera& camera, const PlateEmit& emit,
+                                      const business::plate::EventParams& params,
+                                      business::plate::EventKind kind);
+
+  business::plate::EventKindMask publishViolations(
+      const Camera& camera, const PlateEmit& emit,
+      const business::plate::EventParams& params);
 
   // Upload ảnh bằng chứng vi phạm (nếu có) → params với snapshot riêng.
   business::plate::EventParams paramsWithViolationImages(

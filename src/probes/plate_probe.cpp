@@ -1522,11 +1522,12 @@ void PlateProbe::workerLoop() {
                       (job.emit.enqueue_at_s > 0.0)
                           ? (worker_start_s - job.emit.enqueue_at_s) * 1000.0
                           : 0.0);
-    // publishPlateEvent còn trả bool gộp — tách thành mask per-kind ở commit
-    // retry per-kind. Tạm coi cả cụm want là cùng thành/bại.
-    const bool ok = publisher_->publishPlateEvent(job.camera, job.emit);
+    // done = nghiệp vụ đã publish xong hoặc bị chặn vĩnh viễn; phần còn lại của
+    // want là lỗi tạm và sẽ được retry riêng, không bắn lại cái đã thành công.
+    const business::plate::EventKindMask done =
+        publisher_->publishPlateEvent(job.camera, job.emit);
     if (job.manager != nullptr)
-      job.manager->settleKinds(job.emit.track_id, job.want, ok ? job.want : 0);
+      job.manager->settleKinds(job.emit.track_id, job.want, done);
     utils::latencyLog("track %lu worker_total: %.0fms",
                       static_cast<unsigned long>(job.emit.track_id),
                       utils::msSince(worker_start_s));

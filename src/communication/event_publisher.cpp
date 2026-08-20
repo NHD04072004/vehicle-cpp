@@ -25,8 +25,13 @@ void EventPublisher::publishBbox(const std::string& camera_code,
   mqtt_->publish(config_.bboxTopic(camera_code), json);
 }
 
-bool EventPublisher::publishPlateEvent(const Camera& camera, const PlateEmit& emit) {
-  if (mqtt_ == nullptr || uploader_ == nullptr) return false;
+business::plate::EventKindMask EventPublisher::publishPlateEvent(const Camera& camera,
+                                                                 const PlateEmit& emit) {
+  using business::plate::EventKind;
+  using business::plate::EventKindMask;
+  using business::plate::kindBit;
+
+  if (mqtt_ == nullptr || uploader_ == nullptr) return 0;
 
   const double pub_start_s = utils::monotonicSeconds();
   const std::string base = "vehicle_" + std::to_string(emit.track_id);
@@ -42,12 +47,14 @@ bool EventPublisher::publishPlateEvent(const Camera& camera, const PlateEmit& em
     plate_key = uploader_->upload(camera.id, "plate", emit.plate_crop.data, base + "_plate.jpg");
 
   if (full_key.empty() && plate_key.empty()) {
+    // Không có ảnh nào → không nghiệp vụ nào bắn được. Mask rỗng = retry tất cả
+    // ở lần sau (track không còn bị xoá sớm nên retry thực sự có hiệu lực).
     LOG_WARN("track %lu: upload snapshot thất bại — hoãn publish event",
              static_cast<unsigned long>(emit.track_id));
     utils::latencyLog("track %lu publish FAIL after upload %.0fms",
                       static_cast<unsigned long>(emit.track_id),
                       utils::msSince(pub_start_s));
-    return false;
+    return 0;
   }
 
   business::plate::EventParams params;
@@ -60,8 +67,16 @@ bool EventPublisher::publishPlateEvent(const Camera& camera, const PlateEmit& em
   params.event_time = utils::utcIso8601();
   params.ai_modules = config_.aiModule();
 
-  if (canPublishNoHelmet(camera, emit) || canPublishWrongLane(camera, emit)) {
-    if (!publishViolations(camera, emit, params)) return false;
+  EventKindMask done = publishViolations(camera, emit, params);
+
+  // Event phương tiện chỉ bắn khi track KHÔNG có vi phạm nào — giữ nguyên hành
+  // vi cũ (event vi phạm đã mang đủ thông tin xe).
+  const bool has_violation = canPublishNoHelmet(camera, emit) ||
+                             canPublishWrongLane(camera, emit) ||
+                             canPublishWrongWay(camera, emit);
+  if (has_violation) {
+    // PLATE coi như xong: thông tin xe đã nằm trong event vi phạm.
+    done |= kindBit(EventKind::kPlate);
   } else {
     const Json::Value event = business::plate::buildVehicleEvent(params);
     const std::string json = business::plate::toCompactJson(event);
@@ -69,18 +84,20 @@ bool EventPublisher::publishPlateEvent(const Camera& camera, const PlateEmit& em
     if (dry_run_) {
       LOG_INFO("dry-run event → %s (full=%zuB plate=%zuB)\n%s", topic.c_str(),
                emit.full_frame.data.size(), emit.plate_crop.data.size(), json.c_str());
+      done |= kindBit(EventKind::kPlate);
     } else {
       const double mqtt_start_s = utils::monotonicSeconds();
       if (!mqtt_->publish(topic, json)) {
         utils::latencyLog("track %lu mqtt FAIL after %.0fms",
                           static_cast<unsigned long>(emit.track_id),
                           utils::msSince(mqtt_start_s));
-        return false;
+        return done;  // PLATE lỗi tạm → retry riêng nó, vi phạm đã xong vẫn giữ
       }
       utils::latencyLog("track %lu mqtt_publish: %.0fms",
                         static_cast<unsigned long>(emit.track_id),
                         utils::msSince(mqtt_start_s));
       LOG_INFO("event: camera=%s plate=%s", camera.code.c_str(), emit.plate.c_str());
+      done |= kindBit(EventKind::kPlate);
     }
   }
 
@@ -98,7 +115,7 @@ bool EventPublisher::publishPlateEvent(const Camera& camera, const PlateEmit& em
       static_cast<unsigned long>(emit.track_id), camera.code.c_str(), emit.plate.c_str(),
       zone_to_event, vote_ms, emit.recognize_count, final_to_event,
       utils::msSince(pub_start_s));
-  return true;
+  return done;
 }
 
 bool EventPublisher::canPublishNoHelmet(const Camera& camera, const PlateEmit& emit) const {
@@ -170,44 +187,67 @@ bool EventPublisher::publishOneViolation(const Camera& camera, const PlateEmit& 
   return true;
 }
 
-bool EventPublisher::publishViolations(const Camera& camera, const PlateEmit& emit,
-                                       const business::plate::EventParams& params) {
+EventPublisher::PublishOutcome EventPublisher::publishViolationKind(
+    const Camera& camera, const PlateEmit& emit,
+    const business::plate::EventParams& vparams, business::plate::EventKind kind) {
+  using business::plate::EventKind;
+
+  Json::Value evidence(Json::objectValue);
+  business::plate::EventParams params = vparams;
+
+  switch (kind) {
+    case EventKind::kNoHelmet:
+      if (!canPublishNoHelmet(camera, emit)) return PublishOutcome::kSkipped;
+      evidence["road_type"] = "highway";
+      // NO_HELMET dùng ảnh chung của track: không mũ là trạng thái kéo dài suốt
+      // hành trình, không phải sự kiện tức thời cần ảnh riêng.
+      break;
+
+    case EventKind::kWrongLane:
+      if (!canPublishWrongLane(camera, emit)) return PublishOutcome::kSkipped;
+      evidence["lane_zone"] = emit.wrong_lane_zone;
+      params = paramsWithViolationImages(camera, emit, vparams, emit.wrong_lane_full,
+                                         emit.wrong_lane_crop, "wrong_lane",
+                                         business::violation::kWrongLane);
+      break;
+
+    case EventKind::kWrongWay:
+      if (!canPublishWrongWay(camera, emit)) return PublishOutcome::kSkipped;
+      evidence["line_name"] = emit.wrong_way_line;
+      evidence["road_type"] = "highway";
+      params = paramsWithViolationImages(camera, emit, vparams, emit.wrong_way_full,
+                                         emit.wrong_way_crop, "wrong_way",
+                                         business::violation::kWrongWay);
+      break;
+
+    default:
+      return PublishOutcome::kSkipped;  // kPlate không đi đường này
+  }
+
+  const char* code = business::plate::eventKindCode(kind);
+  if (code == nullptr) return PublishOutcome::kSkipped;
+  return publishOneViolation(camera, emit, params, code, evidence) ? PublishOutcome::kOk
+                                                                   : PublishOutcome::kRetry;
+}
+
+business::plate::EventKindMask EventPublisher::publishViolations(
+    const Camera& camera, const PlateEmit& emit,
+    const business::plate::EventParams& params) {
+  using business::plate::EventKind;
+  using business::plate::EventKindMask;
+
   business::plate::EventParams vparams = params;
   if (vparams.direction.empty()) vparams.direction = "IN";
 
-  bool any_failed = false;
-
-  if (canPublishNoHelmet(camera, emit)) {
-    Json::Value evidence(Json::objectValue);
-    evidence["road_type"] = "highway";
-    if (!publishOneViolation(camera, emit, vparams, business::violation::kNoHelmet, evidence))
-      any_failed = true;
+  EventKindMask done = 0;
+  for (EventKind kind :
+       {EventKind::kNoHelmet, EventKind::kWrongLane, EventKind::kWrongWay}) {
+    // kOk và kSkipped đều là "xong": kSkipped nghĩa là không đủ điều kiện hoặc
+    // VMS chưa bật mã — thử lại cũng cho kết quả y hệt. Chỉ kRetry mới để lại.
+    if (publishViolationKind(camera, emit, vparams, kind) != PublishOutcome::kRetry)
+      done |= business::plate::kindBit(kind);
   }
-
-  if (canPublishWrongLane(camera, emit)) {
-    Json::Value evidence(Json::objectValue);
-    evidence["lane_zone"] = emit.wrong_lane_zone;
-    const business::plate::EventParams lane_params = paramsWithViolationImages(
-        camera, emit, vparams, emit.wrong_lane_full, emit.wrong_lane_crop, "wrong_lane",
-        business::violation::kWrongLane);
-    if (!publishOneViolation(camera, emit, lane_params, business::violation::kWrongLane,
-                             evidence))
-      any_failed = true;
-  }
-
-  if (canPublishWrongWay(camera, emit)) {
-    Json::Value evidence(Json::objectValue);
-    evidence["line_name"] = emit.wrong_way_line;
-    evidence["road_type"] = "highway";
-    const business::plate::EventParams way_params = paramsWithViolationImages(
-        camera, emit, vparams, emit.wrong_way_full, emit.wrong_way_crop, "wrong_way",
-        business::violation::kWrongWay);
-    if (!publishOneViolation(camera, emit, way_params, business::violation::kWrongWay,
-                             evidence))
-      any_failed = true;
-  }
-
-  return !any_failed;
+  return done;
 }
 
 business::plate::EventParams EventPublisher::paramsWithViolationImages(
