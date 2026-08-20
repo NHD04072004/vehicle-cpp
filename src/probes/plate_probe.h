@@ -9,12 +9,13 @@
 #include <map>
 #include <memory>
 #include <mutex>
-#include <set>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "business/plate/plate_recognizer.h"
+#include "business/violation/wrong_lane.h"
+#include "business/violation/wrong_way.h"
 #include "common/config.h"
 #include "common/types.h"
 #include "communication/event_publisher.h"
@@ -104,12 +105,6 @@ class PlateProbe {
   GstPadProbeReturn handleMeta(GstPadProbeInfo* info);
   GstPadProbeReturn handleImages(GstPadProbeInfo* info);
 
-  struct LanePolygon {
-    std::vector<Point> polygon;
-    std::set<int> allowed_classes;  // loại xe được phép ở làn này
-    std::string zone_name;
-  };
-
   // Kết quả tra polygon PLATE: phân biệt "chưa có ROI" với "có ROI nhưng rỗng".
   struct PlateZones {
     std::vector<std::vector<Point>> polygons;
@@ -119,15 +114,14 @@ class PlateProbe {
   // Tạo recognizer đã nạp sẵn timing rendezvous WRONG_WAY.
   std::unique_ptr<business::plate::PlateRecognizer> makeRecognizer() const;
   SourceState* sourceState(unsigned int source_id);
-  PlateZones plateZonesFor(const std::string& camera_code, double frame_w, double frame_h,
-                           double source_w, double source_h);
-  std::vector<LanePolygon> lanePolygonsFor(const std::string& camera_code,
-                                           double frame_w, double frame_h,
-                                           double source_w, double source_h);
+  PlateZones plateZonesFor(const std::string& camera_code,
+                           const business::violation::FrameScale& scale);
+  // Zone *_LANE đã scale sang pixel (luật lọc ở violation::laneZones).
+  std::vector<business::violation::LanePolygon> lanePolygonsFor(
+      const std::string& camera_code, const business::violation::FrameScale& scale);
   // Line REVERSE_DIRECTION đã scale sang pixel; bỏ line thiếu direction.
-  std::vector<business::plate::WrongWayLine> wrongWayLinesFor(
-      const std::string& camera_code, double frame_w, double frame_h, double source_w,
-      double source_h);
+  std::vector<business::violation::WrongWayLine> wrongWayLinesFor(
+      const std::string& camera_code, const business::violation::FrameScale& scale);
   // Cảnh báo 1 lần/version khi ZoneSet không chứa zone PLATE nào.
   void warnMissingPlateZone(const std::string& camera_code, const ZoneSet& set);
   void warnLineWithoutDirection(const std::string& camera_code, const ZoneSet& set,

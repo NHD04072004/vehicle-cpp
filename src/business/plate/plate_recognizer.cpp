@@ -2,7 +2,6 @@
 
 #include "business/plate/rules.h"
 #include "common/logging.h"
-#include "utils/geometry.h"
 #include "utils/latency.h"
 
 namespace vehicle {
@@ -101,47 +100,28 @@ bool PlateRecognizer::observeWrongWay(uint64_t track_id, const Point& anchor,
   if (it == tracks_.end()) return false;
   TrackPlateState& state = it->second;
 
-  const bool had_prev = state.hasLastAnchor();
-  const Point prev = state.lastAnchor();
-  state.setLastAnchor(anchor);
-  state.pushAnchorHistory(anchor);
-  if (!had_prev || lines.empty()) return false;
+  violation::MotionHistory& motion = state.motionMut();
+  const bool had_prev = motion.hasLast();
+  const Point prev = motion.last();
+  motion.push(anchor);
+  if (!had_prev) return false;
 
-  const double dx = anchor.x - prev.x;
-  const double dy = anchor.y - prev.y;
-  if (dx * dx + dy * dy < kMinWrongWayMovePx * kMinWrongWayMovePx) return false;
-
-  // Xe đỗ ngay trên vạch: bbox vẫn nhấp nháy vài px mỗi frame nên đoạn
-  // prev→anchor liên tục "cắt" line. Xét trạng thái đứng yên trên cả history
-  // (tán xạ quanh 1 tâm) mới loại được, ngưỡng 1 frame là không đủ.
-  if (state.isStationary()) return false;
-
-  // Hướng chuyển động lấy từ 3-4 anchor gần nhất: hiệu 2 frame liên tiếp quá
-  // nhạy với jitter bbox, đủ để lật ngược dấu tích vô hướng ở xe đi chậm.
-  const Point motion = state.motionVector();
-  if (motion.x == 0.0 && motion.y == 0.0) return false;  // chưa đủ cơ sở về hướng
-
-  for (const WrongWayLine& line : lines) {
-    // Điều kiện 1: phải thực sự cắt qua line REVERSE_DIRECTION.
-    if (!utils::segmentsIntersect(prev, anchor, line.a, line.b)) continue;
-
-    // Điều kiện 2: hướng đi lệch <= ngưỡng so với direction_vector (chiều CẤM
-    // — mũi tên vẽ trên line). Lệch > 90 độ là đi ngược mũi tên → hợp lệ.
-    const double angle = utils::angleBetweenDeg(motion, line.direction);
-    if (angle < 0.0 || angle > ww_max_angle_deg_) {
+  const violation::CrossResult cross =
+      violation::detectCrossing(prev, anchor, motion, lines, ww_max_angle_deg_);
+  if (cross.line == nullptr) {
+    if (cross.rejected_line != nullptr) {
       LOG_DEBUG("track %lu: cắt line '%s' nhưng lệch %.1f độ (> %.1f) — bỏ qua",
-                static_cast<unsigned long>(track_id), line.name.c_str(), angle,
-                ww_max_angle_deg_);
-      continue;
+                static_cast<unsigned long>(track_id), cross.rejected_line->name.c_str(),
+                cross.rejected_angle_deg, ww_max_angle_deg_);
     }
-
-    state.addWrongWayObservation(line.name, now_s);
-    LOG_INFO("track %lu: WRONG_WAY cắt line '%s' cùng chiều cấm, lệch %.1f độ (lần %d)",
-             static_cast<unsigned long>(track_id), line.name.c_str(), angle,
-             state.wrongWayHits());
-    return true;
+    return false;
   }
-  return false;
+
+  state.addWrongWayObservation(cross.line->name, now_s);
+  LOG_INFO("track %lu: WRONG_WAY cắt line '%s' cùng chiều cấm, lệch %.1f độ (lần %d)",
+           static_cast<unsigned long>(track_id), cross.line->name.c_str(), cross.angle_deg,
+           state.wrongWayHits());
+  return true;
 }
 
 CropScore PlateRecognizer::lastCropCandidate(uint64_t track_id) const {

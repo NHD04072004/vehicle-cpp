@@ -5,24 +5,19 @@
 #include <cstdint>
 #include <map>
 #include <mutex>
-#include <set>
 #include <string>
 #include <vector>
 
 #include "business/plate/track.h"
+#include "business/violation/wrong_way.h"
 #include "common/config.h"
 
 namespace vehicle {
 namespace business {
 namespace plate {
 
-// Line REVERSE_DIRECTION đã scale sang pixel của frame hiện tại.
-struct WrongWayLine {
-  Point a;
-  Point b;
-  Point direction;  // chiều CẤM (mũi tên): đi cùng chiều này = vi phạm
-  std::string name;
-};
+// Line REVERSE_DIRECTION đã scale sang pixel — định nghĩa ở violation/wrong_way.h.
+using violation::WrongWayLine;
 
 // Số liệu của MỘT nghiệp vụ tại thời điểm sẵn sàng emit. Không giữ string —
 // nhãn nằm ở ReadyEmit::labels để struct này POD.

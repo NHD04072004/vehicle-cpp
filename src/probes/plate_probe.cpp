@@ -16,6 +16,9 @@
 #include <vector>
 
 #include "business/violation/constants.h"
+#include "business/violation/no_helmet.h"
+#include "business/violation/wrong_lane.h"
+#include "business/violation/wrong_way.h"
 #include "common/logging.h"
 #include "probes/char_assembler.h"
 #include "utils/geometry.h"
@@ -37,11 +40,11 @@ constexpr double kMemStatsIntervalS = 5.0;
 // để encode fail không khoá track khỏi việc chụp lại.
 constexpr double kCropPendingTtlS = 0.5;
 constexpr const char* kPlateZoneName = "PLATE";
-constexpr const char* kWrongLaneSnapshotKey = "__WRONG_LANE__";
-constexpr const char* kWrongWaySnapshotKey = "__WRONG_WAY__";
+constexpr const char* kWrongLaneSnapshotKey = business::violation::kWrongLaneSnapshotKey;
+constexpr const char* kWrongWaySnapshotKey = business::violation::kWrongWaySnapshotKey;
 
 bool isPlateZone(const Zone& zone) {
-  if (!laneAllowedClasses(zone.name).empty()) return false;
+  if (business::violation::isLaneZone(zone)) return false;
   if (zone.hasAiModule(kPlateZoneName)) return true;
   return utils::toUpper(utils::trim(zone.name)) == kPlateZoneName;
 }
@@ -383,9 +386,8 @@ PlateProbe::SourceState* PlateProbe::sourceState(unsigned int source_id) {
   return it->second.get();
 }
 
-PlateProbe::PlateZones PlateProbe::plateZonesFor(const std::string& camera_code, double frame_w,
-                                                 double frame_h, double source_w,
-                                                 double source_h) {
+PlateProbe::PlateZones PlateProbe::plateZonesFor(
+    const std::string& camera_code, const business::violation::FrameScale& scale) {
   PlateZones out;
   ZoneSet set;
   {
@@ -399,17 +401,8 @@ PlateProbe::PlateZones PlateProbe::plateZonesFor(const std::string& camera_code,
   out.polygons.reserve(set.zones.size());
   for (const Zone& zone : set.zones) {
     if (!isPlateZone(zone)) continue;
-    if (zone.normalized) {
-      out.polygons.push_back(utils::scaleZone(zone.points, frame_w, frame_h));
-      continue;
-    }
-    // Toạ độ pixel theo độ phân giải nguồn → quy về không gian của muxer.
-    const double sx = (source_w > 0.0) ? frame_w / source_w : 1.0;
-    const double sy = (source_h > 0.0) ? frame_h / source_h : 1.0;
-    std::vector<Point> scaled;
-    scaled.reserve(zone.points.size());
-    for (const Point& p : zone.points) scaled.push_back({p.x * sx, p.y * sy});
-    out.polygons.push_back(std::move(scaled));
+    out.polygons.push_back(
+        business::violation::scalePolygon(zone.points, zone.normalized, scale));
   }
 
   if (out.polygons.empty()) warnMissingPlateZone(camera_code, set);
@@ -447,9 +440,8 @@ void PlateProbe::warnMissingPlateZone(const std::string& camera_code, const Zone
       camera_code.c_str(), set.zones.size(), kPlateZoneName, names.c_str());
 }
 
-std::vector<PlateProbe::LanePolygon> PlateProbe::lanePolygonsFor(
-    const std::string& camera_code, double frame_w, double frame_h, double source_w,
-    double source_h) {
+std::vector<business::violation::LanePolygon> PlateProbe::lanePolygonsFor(
+    const std::string& camera_code, const business::violation::FrameScale& scale) {
   ZoneSet set;
   {
     std::lock_guard<std::mutex> lock(zones_mutex_);
@@ -457,32 +449,11 @@ std::vector<PlateProbe::LanePolygon> PlateProbe::lanePolygonsFor(
     if (it == zones_.end()) return {};
     set = it->second;
   }
-
-  std::vector<LanePolygon> lanes;
-  for (const Zone& zone : set.zones) {
-    const std::set<int> allowed = laneAllowedClasses(zone.name);
-    if (allowed.empty()) continue;  // không phải zone *_LANE hợp lệ
-
-    LanePolygon lane;
-    lane.allowed_classes = allowed;
-    lane.zone_name = zone.name;
-    if (zone.normalized) {
-      lane.polygon = utils::scaleZone(zone.points, frame_w, frame_h);
-    } else {
-      // Toạ độ pixel theo độ phân giải nguồn → quy về không gian của muxer.
-      const double sx = (source_w > 0.0) ? frame_w / source_w : 1.0;
-      const double sy = (source_h > 0.0) ? frame_h / source_h : 1.0;
-      lane.polygon.reserve(zone.points.size());
-      for (const Point& p : zone.points) lane.polygon.push_back({p.x * sx, p.y * sy});
-    }
-    lanes.push_back(std::move(lane));
-  }
-  return lanes;
+  return business::violation::laneZones(set.zones, scale);
 }
 
-std::vector<business::plate::WrongWayLine> PlateProbe::wrongWayLinesFor(
-    const std::string& camera_code, double frame_w, double frame_h, double source_w,
-    double source_h) {
+std::vector<business::violation::WrongWayLine> PlateProbe::wrongWayLinesFor(
+    const std::string& camera_code, const business::violation::FrameScale& scale) {
   ZoneSet set;
   {
     std::lock_guard<std::mutex> lock(zones_mutex_);
@@ -491,34 +462,10 @@ std::vector<business::plate::WrongWayLine> PlateProbe::wrongWayLinesFor(
     set = it->second;
   }
 
-  std::vector<business::plate::WrongWayLine> lines;
-  for (const Line& line : set.lines) {
-    if (!isReverseDirectionLine(line.name)) continue;
-    // Không có chiều đi đúng → không kết luận được ngược chiều.
-    if (!line.has_direction) {
-      warnLineWithoutDirection(camera_code, set, line.name);
-      continue;
-    }
-    if (line.points.size() < 2) continue;
-
-    business::plate::WrongWayLine out;
-    out.name = line.name;
-    if (line.normalized) {
-      out.a = {line.points[0].x * frame_w, line.points[0].y * frame_h};
-      out.b = {line.points[1].x * frame_w, line.points[1].y * frame_h};
-    } else {
-      const double sx = (source_w > 0.0) ? frame_w / source_w : 1.0;
-      const double sy = (source_h > 0.0) ? frame_h / source_h : 1.0;
-      out.a = {line.points[0].x * sx, line.points[0].y * sy};
-      out.b = {line.points[1].x * sx, line.points[1].y * sy};
-    }
-    // Giữ nguyên vector gốc: angleBetweenDeg tự chuẩn hoá độ dài nên chỉ cần
-    // đúng HƯỚNG. Scale bất đẳng hướng (1920 vs 1080) sẽ làm méo góc — vector
-    // 45 độ (1,1) sau khi nhân thành (1920,1080) chỉ còn 29.4 độ, lệch 15.6 độ
-    // — đủ để phép so với max_angle_deg sai ở cả hai chiều.
-    out.direction = line.direction;
-    lines.push_back(std::move(out));
-  }
+  std::string missing_direction;
+  std::vector<business::violation::WrongWayLine> lines =
+      business::violation::wrongWayLines(set.lines, scale, &missing_direction);
+  if (!missing_direction.empty()) warnLineWithoutDirection(camera_code, set, missing_direction);
   return lines;
 }
 
@@ -748,8 +695,8 @@ GstPadProbeReturn PlateProbe::handleBbox(GstPadProbeInfo* info) {
 
     const double frame_w = static_cast<double>(frame->source_frame_width);
     const double frame_h = static_cast<double>(frame->source_frame_height);
-    const PlateZones plate_zones =
-        plateZonesFor(state->camera.code, frame_w, frame_h, frame_w, frame_h);
+    const business::violation::FrameScale scale{frame_w, frame_h, frame_w, frame_h};
+    const PlateZones plate_zones = plateZonesFor(state->camera.code, scale);
     const std::vector<std::vector<Point>>& polygons = plate_zones.polygons;
     // Chưa có polygon PLATE → vẫn vẽ bbox tracking, nhưng không xe nào được coi
     // là trong zone (không OCR, không event).
@@ -832,18 +779,18 @@ GstPadProbeReturn PlateProbe::handleMeta(GstPadProbeInfo* info) {
     const double frame_w = static_cast<double>(frame->source_frame_width);
     const double frame_h = static_cast<double>(frame->source_frame_height);
 
-    const PlateZones plate_zones =
-        plateZonesFor(state->camera.code, frame_w, frame_h, frame_w, frame_h);
+    const business::violation::FrameScale scale{frame_w, frame_h, frame_w, frame_h};
+    const PlateZones plate_zones = plateZonesFor(state->camera.code, scale);
     // Không có polygon PLATE → không OCR, không vi phạm, không event. Bbox tracking
     // vẫn được publish ở handleBbox.
     if (plate_zones.polygons.empty()) continue;
     const std::vector<std::vector<Point>>& polygons = plate_zones.polygons;
-    const std::vector<LanePolygon> lane_polygons =
-        lanePolygonsFor(state->camera.code, frame_w, frame_h, frame_w, frame_h);
-    const std::vector<business::plate::WrongWayLine> wrong_way_lines =
-        wrong_way_cfg.enabled
-            ? wrongWayLinesFor(state->camera.code, frame_w, frame_h, frame_w, frame_h)
-            : std::vector<business::plate::WrongWayLine>{};
+    const std::vector<business::violation::LanePolygon> lane_polygons =
+        wrong_lane_cfg.enabled ? lanePolygonsFor(state->camera.code, scale)
+                               : std::vector<business::violation::LanePolygon>{};
+    const std::vector<business::violation::WrongWayLine> wrong_way_lines =
+        wrong_way_cfg.enabled ? wrongWayLinesFor(state->camera.code, scale)
+                              : std::vector<business::violation::WrongWayLine>{};
 
     // Phân tầng metadata: xe (PGIE) → biển (SGIE1) → ký tự (SGIE2).
     std::vector<NvDsObjectMeta*> vehicles;
@@ -858,7 +805,7 @@ GstPadProbeReturn PlateProbe::handleMeta(GstPadProbeInfo* info) {
         vehicles.push_back(obj);
       } else if (component == pipe.sgie_helmet.unique_id) {
         if (obj->parent == nullptr) continue;
-        if (obj->class_id != helmet_cfg.no_helmet_class_id) continue;
+        if (!business::violation::isNoHelmetClass(helmet_cfg, obj->class_id)) continue;
         ++no_helmet_of[obj->parent];
       } else if (component == pipe.sgie_plate.unique_id) {
         NvDsObjectMeta* parent = obj->parent;
@@ -906,19 +853,18 @@ GstPadProbeReturn PlateProbe::handleMeta(GstPadProbeInfo* info) {
 
       state->manager->observeVehicle(track_id, vehicle_cls, vehicle->confidence, in_zone, now_s);
 
-      if (wrong_lane_cfg.enabled &&
-          (in_zone || state->manager->everEnteredPlateZone(track_id))) {
-        for (const LanePolygon& lane : lane_polygons) {
-          if (lane.allowed_classes.count(vehicle_cls) > 0) continue;  // đúng làn
-          if (utils::pointInPolygon(anchor, lane.polygon)) {
-            state->manager->observeLane(track_id, lane.zone_name);
-            submitViolationSnapshot(state, track_id, business::plate::EventKind::kWrongLane,
-                                    kWrongLaneSnapshotKey, vehicle->rect_params.left,
-                                    vehicle->rect_params.top, vehicle->rect_params.width,
-                                    vehicle->rect_params.height, frame->source_id,
-                                    frame->frame_num);
-            break;
-          }
+      if (!lane_polygons.empty() &&
+          business::violation::shouldEvaluateWrongLane(
+              wrong_lane_cfg, in_zone, state->manager->everEnteredPlateZone(track_id))) {
+        const business::violation::LanePolygon* lane =
+            business::violation::findViolatedLane(anchor, vehicle_cls, lane_polygons);
+        if (lane != nullptr) {
+          state->manager->observeLane(track_id, lane->zone_name);
+          submitViolationSnapshot(state, track_id, business::plate::EventKind::kWrongLane,
+                                  kWrongLaneSnapshotKey, vehicle->rect_params.left,
+                                  vehicle->rect_params.top, vehicle->rect_params.width,
+                                  vehicle->rect_params.height, frame->source_id,
+                                  frame->frame_num);
         }
       }
 
@@ -937,8 +883,8 @@ GstPadProbeReturn PlateProbe::handleMeta(GstPadProbeInfo* info) {
 
       if (!in_zone) continue;
 
-      // NO_HELMET chỉ áp dụng cho xe máy.
-      if (helmet_cfg.enabled && vehicle_cls == kClassMotorbike) {
+      // NO_HELMET chỉ áp dụng cho xe máy (in_zone chắc chắn true ở đây).
+      if (business::violation::shouldEvaluateNoHelmet(helmet_cfg, vehicle_cls, in_zone)) {
         auto helmet_it = no_helmet_of.find(vehicle);
         if (helmet_it != no_helmet_of.end())
           state->manager->observeHelmet(track_id, helmet_it->second);

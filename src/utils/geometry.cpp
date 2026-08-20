@@ -75,13 +75,6 @@ BoundingBox normalizeBox(const BoundingBox& box, double frame_w, double frame_h)
   return out;
 }
 
-std::vector<Point> scaleZone(const std::vector<Point>& points, double frame_w, double frame_h) {
-  std::vector<Point> scaled;
-  scaled.reserve(points.size());
-  for (const Point& p : points) scaled.push_back({p.x * frame_w, p.y * frame_h});
-  return scaled;
-}
-
 namespace {
 
 // >0 trái, <0 phải, 0 thẳng hàng.

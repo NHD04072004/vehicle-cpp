@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "business/plate/rules.h"
+#include "business/violation/wrong_way.h"
 
 namespace vehicle {
 namespace business {
@@ -130,19 +131,10 @@ class TrackPlateState {
   bool hasWrongLaneSnapshot() const { return kind(EventKind::kWrongLane).has_snapshot; }
   void markHasWrongLaneSnapshot() { markHasSnapshot(EventKind::kWrongLane); }
 
-  // Vị trí anchor frame trước — để phát hiện cắt vạch giữa 2 frame.
-  bool hasLastAnchor() const { return has_last_anchor_; }
-  const Point& lastAnchor() const { return last_anchor_; }
-  void setLastAnchor(const Point& p) { last_anchor_ = p; has_last_anchor_ = true; }
-
-  // Lịch sử anchor (cũ → mới, tối đa kMotionHistoryLen) để tính vector hướng
-  // chuyển động mượt hơn hiệu 2 frame liên tiếp.
-  void pushAnchorHistory(const Point& p);
-  // Hướng chuyển động hiện tại; {0,0} nếu chưa đủ điểm hoặc xe đứng yên.
-  Point motionVector() const;
-  // Xe đang đứng yên: anchor chỉ dao động quanh 1 tâm (sai số detection), không
-  // trôi theo hướng nào. Chưa đủ history cũng coi là chưa đủ cơ sở → true.
-  bool isStationary() const;
+  // Lịch sử anchor để phát hiện cắt vạch + tính hướng chuyển động.
+  // Luật chuyển động nằm trọn ở violation::MotionHistory; track chỉ giữ state.
+  const violation::MotionHistory& motion() const { return motion_; }
+  violation::MotionHistory& motionMut() { return motion_; }
 
   void addWrongWayObservation(const std::string& line_name, double now_s = 0.0);
   bool needsWrongWaySnapshot() const { return kind(EventKind::kWrongWay).needs_snapshot; }
@@ -212,9 +204,7 @@ class TrackPlateState {
   // Nhãn bằng chứng theo kind (zone LANE / line REVERSE_DIRECTION). Tách khỏi
   // ViolationState để struct đó giữ nguyên POD và không cấp phát.
   std::array<std::string, kEventKindCount> kind_label_{};
-  Point last_anchor_;
-  bool has_last_anchor_ = false;
-  std::vector<Point> anchor_history_;
+  violation::MotionHistory motion_;
   // Chuỗi biển raw → điểm mẫu tốt nhất (phatnguoi _sample_by_plate).
   std::map<std::string, SnapshotScore> samples_by_plate_;
   std::string best_snapshot_key_;

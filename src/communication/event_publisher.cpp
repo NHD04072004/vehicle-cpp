@@ -1,6 +1,9 @@
 #include "communication/event_publisher.h"
 
 #include "business/violation/constants.h"
+#include "business/violation/no_helmet.h"
+#include "business/violation/wrong_lane.h"
+#include "business/violation/wrong_way.h"
 #include "common/logging.h"
 #include "utils/latency.h"
 #include "utils/time_utils.h"
@@ -122,38 +125,30 @@ bool EventPublisher::canPublish(const Camera& camera, const PlateEmit& emit,
                                 business::plate::EventKind kind) const {
   using business::plate::EventKind;
 
-  bool enabled = false;
-  int min_hits = 0;
+  // Ngưỡng riêng của từng nghiệp vụ nằm ở business/violation/<kind>.h.
   int hits = 0;
+  bool meets = false;
   switch (kind) {
-    case EventKind::kNoHelmet: {
-      const HelmetViolationConfig& cfg = config_.violation().helmet;
-      // Không đội mũ chỉ áp dụng cho xe máy.
-      if (emit.vehicle_cls != kClassMotorbike) return false;
-      enabled = cfg.enabled;
-      min_hits = cfg.min_hits;
+    case EventKind::kNoHelmet:
       hits = emit.no_helmet_frames;
+      meets = business::violation::noHelmetMeetsThreshold(config_.violation().helmet,
+                                                          emit.vehicle_cls, hits);
       break;
-    }
-    case EventKind::kWrongLane: {
-      const LaneViolationConfig& cfg = config_.violation().wrong_lane;
-      enabled = cfg.enabled;
-      min_hits = cfg.min_hits;
+    case EventKind::kWrongLane:
       hits = emit.wrong_lane_frames;
+      meets = business::violation::wrongLaneMeetsThreshold(config_.violation().wrong_lane,
+                                                           hits);
       break;
-    }
-    case EventKind::kWrongWay: {
-      const WrongWayViolationConfig& cfg = config_.violation().wrong_way;
-      enabled = cfg.enabled;
-      min_hits = cfg.min_hits;
+    case EventKind::kWrongWay:
       hits = emit.wrong_way_hits;  // số lần CHẠM line REVERSE_DIRECTION
+      meets = business::violation::wrongWayMeetsThreshold(config_.violation().wrong_way,
+                                                          hits);
       break;
-    }
     default:
       return false;  // kPlate không đi đường vi phạm
   }
 
-  if (!enabled || hits < min_hits) return false;
+  if (!meets) return false;
 
   const char* code = business::plate::eventKindCode(kind);
   if (violations_ == nullptr || code == nullptr || !violations_->allows(code, camera.id)) {
@@ -192,36 +187,36 @@ EventPublisher::PublishOutcome EventPublisher::publishViolationKind(
     const business::plate::EventParams& vparams, business::plate::EventKind kind) {
   using business::plate::EventKind;
 
+  if (kind == EventKind::kPlate) return PublishOutcome::kSkipped;  // không đi đường này
+  if (!canPublish(camera, emit, kind)) return PublishOutcome::kSkipped;
+
+  // Evidence do chính module nghiệp vụ dựng — publisher chỉ lo vận chuyển.
   Json::Value evidence(Json::objectValue);
   business::plate::EventParams params = vparams;
 
   switch (kind) {
     case EventKind::kNoHelmet:
-      if (!canPublish(camera, emit, kind)) return PublishOutcome::kSkipped;
-      evidence["road_type"] = "highway";
+      evidence = business::violation::buildNoHelmetEvidence();
       // NO_HELMET dùng ảnh chung của track: không mũ là trạng thái kéo dài suốt
       // hành trình, không phải sự kiện tức thời cần ảnh riêng.
       break;
 
     case EventKind::kWrongLane:
-      if (!canPublish(camera, emit, kind)) return PublishOutcome::kSkipped;
-      evidence["lane_zone"] = emit.wrong_lane_zone;
+      evidence = business::violation::buildWrongLaneEvidence(emit.wrong_lane_zone);
       params = paramsWithViolationImages(camera, emit, vparams, emit.wrong_lane_full,
                                          emit.wrong_lane_crop, "wrong_lane",
                                          business::violation::kWrongLane);
       break;
 
     case EventKind::kWrongWay:
-      if (!canPublish(camera, emit, kind)) return PublishOutcome::kSkipped;
-      evidence["line_name"] = emit.wrong_way_line;
-      evidence["road_type"] = "highway";
+      evidence = business::violation::buildWrongWayEvidence(emit.wrong_way_line);
       params = paramsWithViolationImages(camera, emit, vparams, emit.wrong_way_full,
                                          emit.wrong_way_crop, "wrong_way",
                                          business::violation::kWrongWay);
       break;
 
     default:
-      return PublishOutcome::kSkipped;  // kPlate không đi đường này
+      return PublishOutcome::kSkipped;
   }
 
   const char* code = business::plate::eventKindCode(kind);

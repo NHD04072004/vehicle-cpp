@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <utility>
 
-#include "utils/geometry.h"
 #include "utils/string_utils.h"
 
 namespace vehicle {
@@ -233,48 +232,6 @@ void TrackPlateState::addHelmetObservation(int no_helmet_count) {
 
 void TrackPlateState::addWrongLaneObservation(const std::string& zone_name) {
   addKindHit(EventKind::kWrongLane, 0.0, 0, zone_name);
-}
-
-void TrackPlateState::pushAnchorHistory(const Point& p) {
-  anchor_history_.push_back(p);
-  if (anchor_history_.size() > kMotionHistoryLen)
-    anchor_history_.erase(anchor_history_.begin());
-}
-
-Point TrackPlateState::motionVector() const {
-  if (anchor_history_.size() < kMinMotionHistoryLen) return Point{0.0, 0.0};
-  if (isStationary()) return Point{0.0, 0.0};
-  const Point v = utils::motionVector(anchor_history_);
-  if (v.x * v.x + v.y * v.y < kMinMotionLenPx * kMinMotionLenPx) return Point{0.0, 0.0};
-  return v;
-}
-
-bool TrackPlateState::isStationary() const {
-  const size_t n = anchor_history_.size();
-  if (n < kMinMotionHistoryLen) return true;  // chưa đủ cơ sở kết luận đang chạy
-
-  // Quãng đường tịnh: xe bò chậm vẫn trôi đều một hướng, xe đỗ thì quay về chỗ cũ.
-  const Point& first = anchor_history_.front();
-  const Point& last = anchor_history_.back();
-  const double net_dx = last.x - first.x;
-  const double net_dy = last.y - first.y;
-  if (net_dx * net_dx + net_dy * net_dy > kStationaryNetPx * kStationaryNetPx)
-    return false;
-
-  // Tán xạ quanh tâm: mọi anchor nằm gọn trong bán kính = chỉ là nhiễu detection.
-  double cx = 0.0, cy = 0.0;
-  for (const Point& p : anchor_history_) {
-    cx += p.x;
-    cy += p.y;
-  }
-  cx /= static_cast<double>(n);
-  cy /= static_cast<double>(n);
-  for (const Point& p : anchor_history_) {
-    const double ddx = p.x - cx;
-    const double ddy = p.y - cy;
-    if (ddx * ddx + ddy * ddy > kStationaryRadiusPx * kStationaryRadiusPx) return false;
-  }
-  return true;
 }
 
 void TrackPlateState::addWrongWayObservation(const std::string& line_name, double now_s) {

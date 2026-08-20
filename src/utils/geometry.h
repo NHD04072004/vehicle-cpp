@@ -24,9 +24,6 @@ double iou(const BoundingBox& a, const BoundingBox& b);
 // Chuẩn hoá bbox pixel → 0..1 theo kích thước frame.
 BoundingBox normalizeBox(const BoundingBox& box, double frame_w, double frame_h);
 
-// Zone lưu toạ độ 0..1 → scale sang pixel.
-std::vector<Point> scaleZone(const std::vector<Point>& points, double frame_w, double frame_h);
-
 // true nếu đoạn [p1,p2] cắt đoạn [a,b] (chạm mút cũng tính).
 bool segmentsIntersect(const Point& p1, const Point& p2, const Point& a, const Point& b);
 

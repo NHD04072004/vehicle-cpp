@@ -12,6 +12,10 @@
 #include "business/plate/plate_recognizer.h"
 #include "business/plate/rules.h"
 #include "business/plate/track.h"
+#include "business/violation/no_helmet.h"
+#include "business/violation/wrong_lane.h"
+#include "business/violation/wrong_way.h"
+#include "business/violation/zone_geometry.h"
 #include "utils/geometry.h"
 
 namespace {
@@ -353,42 +357,56 @@ void testKindLifecycle() {
 }
 
 // ---------------------------------------------------------------------------
-// TrackPlateState — hình học WRONG_WAY
+// violation::MotionHistory — hình học WRONG_WAY
 // ---------------------------------------------------------------------------
 void testMotion() {
   std::printf("== motion / stationary ==\n");
   using vehicle::Point;
+  using vehicle::business::violation::MotionHistory;
 
   {
     // Xe đỗ: anchor chỉ rung vài px quanh 1 tâm → phải coi là đứng yên.
-    TrackPlateState st(7, 0.0);
-    st.pushAnchorHistory(Point{100.0, 100.0});
-    st.pushAnchorHistory(Point{101.0, 99.0});
-    st.pushAnchorHistory(Point{99.0, 101.0});
-    st.pushAnchorHistory(Point{100.0, 100.0});
-    check(st.isStationary(), "xe đỗ rung bbox → isStationary() true");
+    MotionHistory m;
+    m.push(Point{100.0, 100.0});
+    m.push(Point{101.0, 99.0});
+    m.push(Point{99.0, 101.0});
+    m.push(Point{100.0, 100.0});
+    check(m.isStationary(), "xe đỗ rung bbox → isStationary() true");
   }
 
   {
     // Xe chạy thẳng: trôi đều theo một hướng.
-    TrackPlateState st(8, 0.0);
-    st.pushAnchorHistory(Point{100.0, 100.0});
-    st.pushAnchorHistory(Point{110.0, 100.0});
-    st.pushAnchorHistory(Point{120.0, 100.0});
-    st.pushAnchorHistory(Point{130.0, 100.0});
-    check(!st.isStationary(), "xe chạy → isStationary() false");
-    const Point mv = st.motionVector();
-    check(mv.x > 0.0, "motionVector().x > 0 khi xe chạy sang phải");
-    check(std::fabs(mv.y) < 1e-6, "motionVector().y ~ 0 khi xe chạy ngang");
+    MotionHistory m;
+    m.push(Point{100.0, 100.0});
+    m.push(Point{110.0, 100.0});
+    m.push(Point{120.0, 100.0});
+    m.push(Point{130.0, 100.0});
+    check(!m.isStationary(), "xe chạy → isStationary() false");
+    const Point mv = m.direction();
+    check(mv.x > 0.0, "direction().x > 0 khi xe chạy sang phải");
+    check(std::fabs(mv.y) < 1e-6, "direction().y ~ 0 khi xe chạy ngang");
   }
 
   {
     // Chưa đủ history → chưa dám kết luận hướng.
-    TrackPlateState st(9, 0.0);
-    st.pushAnchorHistory(Point{0.0, 0.0});
-    check(st.isStationary(), "1 anchor: coi như chưa đủ cơ sở → true");
-    const Point mv = st.motionVector();
-    check(mv.x == 0.0 && mv.y == 0.0, "1 anchor: motionVector() = {0,0}");
+    MotionHistory m;
+    m.push(Point{0.0, 0.0});
+    check(m.isStationary(), "1 anchor: coi như chưa đủ cơ sở → true");
+    const Point mv = m.direction();
+    check(mv.x == 0.0 && mv.y == 0.0, "1 anchor: direction() = {0,0}");
+  }
+
+  {
+    // last()/hasLast(): vị trí frame trước để dựng đoạn di chuyển.
+    MotionHistory m;
+    check(!m.hasLast(), "chưa push: hasLast() false");
+    m.push(Point{5.0, 6.0});
+    check(m.hasLast() && m.last().x == 5.0 && m.last().y == 6.0,
+          "sau push: last() là anchor vừa đẩy");
+    check(!MotionHistory::movedEnough(Point{0.0, 0.0}, Point{1.0, 0.0}),
+          "dịch 1px < ngưỡng → movedEnough false");
+    check(MotionHistory::movedEnough(Point{0.0, 0.0}, Point{10.0, 0.0}),
+          "dịch 10px → movedEnough true");
   }
 }
 
@@ -580,6 +598,209 @@ void testClearStaleWrongWay() {
 
 }  // namespace
 
+// ---------------------------------------------------------------------------
+// violation/zone_geometry — quy ROI của VMS về pixel của frame
+// ---------------------------------------------------------------------------
+void testZoneGeometry() {
+  std::printf("== zone_geometry ==\n");
+  namespace v = vehicle::business::violation;
+  using vehicle::Point;
+
+  const v::FrameScale scale{1920.0, 1080.0, 960.0, 540.0};
+
+  {
+    // normalized: nhân thẳng kích thước frame, KHÔNG dính source_w/h.
+    const Point p = v::scalePoint(Point{0.5, 0.25}, true, scale);
+    check(p.x == 960.0 && p.y == 270.0, "normalized: 0.5x0.25 → 960x270");
+  }
+
+  {
+    // pixel theo nguồn 960x540 → frame 1920x1080 là gấp đôi.
+    const Point p = v::scalePoint(Point{100.0, 200.0}, false, scale);
+    check(p.x == 200.0 && p.y == 400.0, "pixel nguồn: nhân hệ số 2x");
+  }
+
+  {
+    // Thiếu độ phân giải nguồn → giữ nguyên pixel, không đoán bừa.
+    const v::FrameScale no_src{1920.0, 1080.0, 0.0, 0.0};
+    const Point p = v::scalePoint(Point{100.0, 200.0}, false, no_src);
+    check(p.x == 100.0 && p.y == 200.0, "thiếu source_w/h: hệ số 1.0");
+  }
+
+  {
+    const std::vector<Point> poly = v::scalePolygon({{0.0, 0.0}, {1.0, 1.0}}, true, scale);
+    check(poly.size() == 2 && poly[1].x == 1920.0 && poly[1].y == 1080.0,
+          "scalePolygon: giữ đủ đỉnh, scale đúng");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// violation/wrong_lane — lọc zone LANE + tra xe sai làn
+// ---------------------------------------------------------------------------
+void testWrongLane() {
+  std::printf("== wrong_lane ==\n");
+  namespace v = vehicle::business::violation;
+  using vehicle::Point;
+  using vehicle::Zone;
+
+  // Ô vuông [0,0]-[100,100] cho ô tô + xe tải; zone PLATE không phải làn.
+  Zone lane;
+  lane.name = "CAR_TRUCK_LANE";
+  lane.normalized = false;
+  lane.points = {{0.0, 0.0}, {100.0, 0.0}, {100.0, 100.0}, {0.0, 100.0}};
+  Zone plate;
+  plate.name = "PLATE";
+  plate.normalized = false;
+  plate.points = lane.points;
+
+  check(v::isLaneZone(lane), "CAR_TRUCK_LANE là zone làn");
+  check(!v::isLaneZone(plate), "PLATE không phải zone làn");
+
+  const v::FrameScale scale{100.0, 100.0, 100.0, 100.0};
+  const std::vector<v::LanePolygon> lanes = v::laneZones({lane, plate}, scale);
+  check(lanes.size() == 1 && lanes[0].zone_name == "CAR_TRUCK_LANE",
+        "laneZones: chỉ lấy zone *_LANE");
+
+  const Point inside{50.0, 50.0};
+  const Point outside{500.0, 500.0};
+  check(v::findViolatedLane(inside, vehicle::kClassMotorbike, lanes) != nullptr,
+        "xe máy trong làn ô tô → vi phạm");
+  check(v::findViolatedLane(inside, vehicle::kClassCar, lanes) == nullptr,
+        "ô tô trong làn ô tô → không vi phạm");
+  check(v::findViolatedLane(outside, vehicle::kClassMotorbike, lanes) == nullptr,
+        "xe máy ngoài mọi làn → không vi phạm");
+
+  vehicle::LaneViolationConfig cfg;
+  cfg.enabled = true;
+  cfg.min_hits = 2;
+  check(!v::shouldEvaluateWrongLane(cfg, false, false),
+        "chưa từng vào zone PLATE → không xét");
+  check(v::shouldEvaluateWrongLane(cfg, false, true),
+        "đã từng vào zone PLATE → vẫn xét dù đang ngoài zone");
+  check(!v::wrongLaneMeetsThreshold(cfg, 1), "1 hit < min_hits=2 → chưa bắn");
+  check(v::wrongLaneMeetsThreshold(cfg, 2), "2 hit = min_hits → bắn");
+  cfg.enabled = false;
+  check(!v::wrongLaneMeetsThreshold(cfg, 9), "module tắt → không bắn dù nhiều hit");
+
+  check(v::buildWrongLaneEvidence("CAR_TRUCK_LANE")["lane_zone"].asString() ==
+            "CAR_TRUCK_LANE",
+        "evidence mang tên zone làn");
+}
+
+// ---------------------------------------------------------------------------
+// violation/wrong_way — lọc line + phát hiện cắt vạch ngược chiều
+// ---------------------------------------------------------------------------
+void testWrongWay() {
+  std::printf("== wrong_way ==\n");
+  namespace v = vehicle::business::violation;
+  using vehicle::Line;
+  using vehicle::Point;
+
+  // Vạch ngang y=50; mũi tên cấm chỉ xuống (+y) → xe đi xuống là vi phạm.
+  Line line;
+  line.name = "REVERSE_DIRECTION";
+  line.normalized = false;
+  line.points = {{0.0, 50.0}, {100.0, 50.0}};
+  line.has_direction = true;
+  line.direction = {0.0, 1.0};
+  check(v::isWrongWayLine(line), "line đủ tên + direction + 2 điểm");
+
+  Line no_dir = line;
+  no_dir.has_direction = false;
+  check(!v::isWrongWayLine(no_dir), "thiếu direction → không dùng được");
+
+  const v::FrameScale scale{200.0, 200.0, 100.0, 100.0};
+  std::string missing;
+  const std::vector<v::WrongWayLine> lines = v::wrongWayLines({line, no_dir}, scale, &missing);
+  check(lines.size() == 1, "wrongWayLines: bỏ line thiếu direction");
+  check(missing == "REVERSE_DIRECTION", "báo lại tên line thiếu direction");
+  check(lines[0].a.y == 100.0 && lines[0].b.y == 100.0, "toạ độ line được scale 2x");
+  // direction giữ nguyên vector gốc — scale bất đẳng hướng sẽ làm méo góc.
+  check(lines[0].direction.x == 0.0 && lines[0].direction.y == 1.0,
+        "direction KHÔNG bị scale (giữ đúng hướng)");
+
+  {
+    // Xe đi xuống cắt vạch, cùng chiều mũi tên cấm → vi phạm.
+    v::MotionHistory m;
+    m.push(Point{50.0, 70.0});
+    m.push(Point{50.0, 85.0});
+    m.push(Point{50.0, 95.0});
+    const Point prev = m.last();
+    m.push(Point{50.0, 110.0});
+    const v::CrossResult r = v::detectCrossing(prev, m.last(), m, lines, 40.0);
+    check(r.line != nullptr, "đi cùng chiều mũi tên cấm + cắt vạch → vi phạm");
+  }
+
+  {
+    // Xe đi lên cắt vạch: ngược mũi tên cấm (180 độ) → hợp lệ.
+    v::MotionHistory m;
+    m.push(Point{50.0, 130.0});
+    m.push(Point{50.0, 115.0});
+    m.push(Point{50.0, 105.0});
+    const Point prev = m.last();
+    m.push(Point{50.0, 90.0});
+    const v::CrossResult r = v::detectCrossing(prev, m.last(), m, lines, 40.0);
+    check(r.line == nullptr, "đi ngược mũi tên cấm → không vi phạm");
+    check(r.rejected_line != nullptr && r.rejected_angle_deg > 90.0,
+          "ghi lại lý do: cắt vạch nhưng lệch góc lớn");
+  }
+
+  {
+    // Xe đỗ ngay trên vạch: bbox rung vài px, không được tính là cắt vạch.
+    v::MotionHistory m;
+    m.push(Point{50.0, 100.0});
+    m.push(Point{51.0, 99.0});
+    m.push(Point{49.0, 101.0});
+    const Point prev = m.last();
+    m.push(Point{50.0, 100.0});
+    const v::CrossResult r = v::detectCrossing(prev, m.last(), m, lines, 40.0);
+    check(r.line == nullptr, "xe đỗ rung bbox trên vạch → không vi phạm");
+  }
+
+  vehicle::WrongWayViolationConfig cfg;
+  cfg.enabled = true;
+  cfg.min_hits = 1;
+  check(v::wrongWayMeetsThreshold(cfg, 1), "1 lần cắt vạch = min_hits → bắn");
+  check(!v::wrongWayMeetsThreshold(cfg, 0), "chưa cắt vạch → không bắn");
+
+  const Json::Value ev = v::buildWrongWayEvidence("REVERSE_DIRECTION");
+  check(ev["line_name"].asString() == "REVERSE_DIRECTION", "evidence mang tên line");
+  check(ev["road_type"].asString() == "highway", "evidence có road_type");
+}
+
+// ---------------------------------------------------------------------------
+// violation/no_helmet — chỉ xe máy, không cần ảnh riêng
+// ---------------------------------------------------------------------------
+void testNoHelmet() {
+  std::printf("== no_helmet ==\n");
+  namespace v = vehicle::business::violation;
+
+  vehicle::HelmetViolationConfig cfg;
+  cfg.enabled = true;
+  cfg.min_hits = 2;
+  cfg.no_helmet_class_id = 0;
+
+  check(v::shouldEvaluateNoHelmet(cfg, vehicle::kClassMotorbike, true),
+        "xe máy trong zone PLATE → xét");
+  check(!v::shouldEvaluateNoHelmet(cfg, vehicle::kClassCar, true),
+        "ô tô → không bao giờ xét NO_HELMET");
+  check(!v::shouldEvaluateNoHelmet(cfg, vehicle::kClassMotorbike, false),
+        "xe máy ngoài zone PLATE → không xét");
+
+  check(v::isNoHelmetClass(cfg, 0), "class 0 = người không đội mũ");
+  check(!v::isNoHelmetClass(cfg, 1), "class 1 = có đội mũ");
+
+  check(!v::noHelmetMeetsThreshold(cfg, vehicle::kClassMotorbike, 1),
+        "1 frame < min_hits=2 → chưa bắn");
+  check(v::noHelmetMeetsThreshold(cfg, vehicle::kClassMotorbike, 2),
+        "2 frame = min_hits → bắn");
+  check(!v::noHelmetMeetsThreshold(cfg, vehicle::kClassCar, 9),
+        "ô tô: nhiều hit vẫn không bắn");
+
+  check(v::buildNoHelmetEvidence()["road_type"].asString() == "highway",
+        "evidence có road_type");
+}
+
 int main() {
   std::printf("vehicle_business_tests\n\n");
   testRules();
@@ -588,6 +809,10 @@ int main() {
   testKindLifecycle();
   testMotion();
   testAngle();
+  testZoneGeometry();
+  testWrongLane();
+  testWrongWay();
+  testNoHelmet();
   testCollectReady();
   testPerKindEmit();
   testClearStaleWrongWay();

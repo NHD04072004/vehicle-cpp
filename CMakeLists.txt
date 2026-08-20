@@ -32,6 +32,11 @@ add_library(vehicle_business STATIC
   src/business/plate/event.cpp
   src/business/plate/plate_recognizer.cpp
   src/business/violation/config_store.cpp
+  src/business/violation/kinds.cpp
+  src/business/violation/zone_geometry.cpp
+  src/business/violation/no_helmet.cpp
+  src/business/violation/wrong_lane.cpp
+  src/business/violation/wrong_way.cpp
   src/probes/char_assembler.cpp
 )
 target_include_directories(vehicle_business PUBLIC
