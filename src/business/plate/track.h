@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <deque>
 #include <map>
 #include <string>
@@ -87,17 +88,55 @@ class TrackPlateState {
   bool shouldRetryMissPush(double now_s) const;
   bool shouldForceDelete(double now_s) const;
 
-  void markPushed() { is_pushed_ = true; }
-  void markPosted() { is_posted_ = true; }
+  // --- Vòng đời per-kind ----------------------------------------------------
+  // Mỗi nghiệp vụ có bộ đếm + cờ riêng, không giết nhau. kinds_ là std::array
+  // (EventKind là enum đóng, cố định 4 phần tử) → O(1) index, 0 cấp phát, nằm
+  // liền khối trong TrackPlateState; map sẽ tốn 4 node rời + pointer-chase mỗi
+  // lần duyệt, mà collectReady duyệt toàn bộ tracks_ mỗi frame.
+  const ViolationState& kind(EventKind k) const { return kinds_[kindIndex(k)]; }
+  ViolationState& kindMut(EventKind k) { return kinds_[kindIndex(k)]; }
+  const std::string& kindLabel(EventKind k) const { return kind_label_[kindIndex(k)]; }
+
+  // Ghi nhận 1 lần vi phạm. label rỗng = kind không có nhãn (kPlate/kNoHelmet).
+  void addKindHit(EventKind k, double now_s = 0.0, int detail = 0,
+                  const std::string& label = std::string());
+
+  void markPushed(EventKind k) { kinds_[kindIndex(k)].pushed = true; }
+  void markPosted(EventKind k) {
+    ViolationState& v = kinds_[kindIndex(k)];
+    v.pushed = true;
+    v.posted = true;
+  }
+  void unmarkPushed(EventKind k) { kinds_[kindIndex(k)].pushed = false; }
+  void markAllPosted();
+  // Reset riêng 1 nghiệp vụ; track vẫn sống để bắn các kind còn lại.
+  void clearKind(EventKind k);
+
+  // kPlate active khi đã chốt biển; kind khác active khi có hit.
+  EventKindMask activeKinds() const;
+  EventKindMask pendingKinds() const;  // active && chưa posted
+  bool allSettled() const { return pendingKinds() == 0; }
+
+  void markSnapshotTaken(EventKind k) { kinds_[kindIndex(k)].needs_snapshot = false; }
+  void markHasSnapshot(EventKind k) { kinds_[kindIndex(k)].has_snapshot = true; }
+
+  // Forwarder tạm cho call-site chưa chuyển sang per-kind. Ánh xạ vào kPlate —
+  // tương đương hành vi cũ vì mọi nghiệp vụ đang chốt/bắn cùng một lúc.
+  // Bị xoá ở commit dọn dẹp sau khi collectReady đã tách theo kind.
+  void markPushed() { markPushed(EventKind::kPlate); }
+  void markPosted() { markPosted(EventKind::kPlate); }
+  bool isPushed() const { return kind(EventKind::kPlate).pushed; }
+  bool isPosted() const { return kind(EventKind::kPlate).posted; }
+
   void addClass(int cls, double conf = 0.0);
 
   void addHelmetObservation(int no_helmet_count);
 
   void addWrongLaneObservation(const std::string& zone_name);
-  bool needsWrongLaneSnapshot() const { return needs_wrong_lane_snapshot_; }
-  void markWrongLaneSnapshotTaken() { needs_wrong_lane_snapshot_ = false; }
-  bool hasWrongLaneSnapshot() const { return has_wrong_lane_snapshot_; }
-  void markHasWrongLaneSnapshot() { has_wrong_lane_snapshot_ = true; }
+  bool needsWrongLaneSnapshot() const { return kind(EventKind::kWrongLane).needs_snapshot; }
+  void markWrongLaneSnapshotTaken() { markSnapshotTaken(EventKind::kWrongLane); }
+  bool hasWrongLaneSnapshot() const { return kind(EventKind::kWrongLane).has_snapshot; }
+  void markHasWrongLaneSnapshot() { markHasSnapshot(EventKind::kWrongLane); }
 
   // Vị trí anchor frame trước — để phát hiện cắt vạch giữa 2 frame.
   bool hasLastAnchor() const { return has_last_anchor_; }
@@ -115,19 +154,20 @@ class TrackPlateState {
   bool isStationary() const;
 
   void addWrongWayObservation(const std::string& line_name, double now_s = 0.0);
-  bool needsWrongWaySnapshot() const { return needs_wrong_way_snapshot_; }
-  void markWrongWaySnapshotTaken() { needs_wrong_way_snapshot_ = false; }
-  bool hasWrongWaySnapshot() const { return has_wrong_way_snapshot_; }
-  void markHasWrongWaySnapshot() { has_wrong_way_snapshot_ = true; }
+  bool needsWrongWaySnapshot() const { return kind(EventKind::kWrongWay).needs_snapshot; }
+  void markWrongWaySnapshotTaken() { markSnapshotTaken(EventKind::kWrongWay); }
+  bool hasWrongWaySnapshot() const { return kind(EventKind::kWrongWay).has_snapshot; }
+  void markHasWrongWaySnapshot() { markHasSnapshot(EventKind::kWrongWay); }
 
   // --- Rendezvous biển số ↔ vi phạm ngược chiều ---
   // Bên nào đến trước thì cache lại; đủ cả hai → chờ settle rồi mới bắn event.
-  // Quá hạn chờ mà thiếu vế còn lại → bỏ track.
-  double wrongWayHitAtS() const { return wrong_way_hit_at_s_; }
+  // Quá hạn chờ mà thiếu vế còn lại → chỉ bỏ vế WRONG_WAY, track vẫn sống.
+  double wrongWayHitAtS() const { return kind(EventKind::kWrongWay).first_hit_at_s; }
   // Mốc "đủ cả hai vế" (0 nếu chưa đủ). Emit sau mốc này + settle.
-  double wrongWayPairedAtS() const { return wrong_way_paired_at_s_; }
+  double wrongWayPairedAtS() const { return kind(EventKind::kWrongWay).paired_at_s; }
   void setWrongWayPairedAt(double now_s) {
-    if (wrong_way_paired_at_s_ <= 0.0) wrong_way_paired_at_s_ = now_s;
+    ViolationState& v = kindMut(EventKind::kWrongWay);
+    if (v.paired_at_s <= 0.0) v.paired_at_s = now_s;
   }
 
   // Class: nhiều phiếu nhất; hoà → tổng conf cao hơn. -1 nếu chưa có.
@@ -137,8 +177,9 @@ class TrackPlateState {
   const std::string& plate() const { return plate_; }
   int plateRecognizeCount() const { return plate_recognize_count_; }
   bool hasFinalPlate() const { return has_final_plate_; }
-  bool isPushed() const { return is_pushed_; }
-  bool isPosted() const { return is_posted_; }
+  // Biển đã normalize sẵn lúc chốt — normalizePlateForEmit không phải chạy lại
+  // mỗi frame cho mỗi track trong collectReady.
+  const std::string& emitPlate() const { return emit_plate_; }
   bool inPolygon() const { return in_polygon_; }
   bool everEnteredPolygon() const { return ever_entered_polygon_; }
   bool hasSnapshotSamples() const { return !samples_by_plate_.empty(); }
@@ -148,12 +189,12 @@ class TrackPlateState {
   double createdAtS() const { return created_at_s_; }
   double firstOcrAtS() const { return first_ocr_at_s_; }
   double finalAtS() const { return final_at_s_; }
-  int noHelmetFrames() const { return no_helmet_frames_; }
-  int noHelmetCount() const { return max_no_helmet_count_; }
-  int wrongLaneFrames() const { return wrong_lane_frames_; }
-  const std::string& wrongLaneZone() const { return wrong_lane_zone_; }
-  int wrongWayHits() const { return wrong_way_hits_; }
-  const std::string& wrongWayLine() const { return wrong_way_line_; }
+  int noHelmetFrames() const { return kind(EventKind::kNoHelmet).hits; }
+  int noHelmetCount() const { return kind(EventKind::kNoHelmet).detail; }
+  int wrongLaneFrames() const { return kind(EventKind::kWrongLane).hits; }
+  const std::string& wrongLaneZone() const { return kindLabel(EventKind::kWrongLane); }
+  int wrongWayHits() const { return kind(EventKind::kWrongWay).hits; }
+  const std::string& wrongWayLine() const { return kindLabel(EventKind::kWrongWay); }
 
  private:
   bool finalizePlate(double now_s);
@@ -174,25 +215,17 @@ class TrackPlateState {
   std::vector<CharSequence> list_plate_chars_;
   std::vector<std::string> list_plate_number_;
   std::string plate_;
+  std::string emit_plate_;  // plate_ đã normalize; set 1 lần lúc chốt
   bool has_final_plate_ = false;
-  bool is_pushed_ = false;
-  bool is_posted_ = false;
   std::vector<std::pair<int, double>> list_cls_;  // (cls, conf)
-  int no_helmet_frames_ = 0;
-  int max_no_helmet_count_ = 0;
-  int wrong_lane_frames_ = 0;
-  std::string wrong_lane_zone_;
-  bool needs_wrong_lane_snapshot_ = false;  // đang chờ probe chụp ảnh vi phạm
-  bool has_wrong_lane_snapshot_ = false;    // đã có ảnh lúc sai làn
-  int wrong_way_hits_ = 0;
-  std::string wrong_way_line_;
-  bool needs_wrong_way_snapshot_ = false;
-  bool has_wrong_way_snapshot_ = false;
+  // Vòng đời 4 nghiệp vụ. Mảng cố định → 0 cấp phát, truy cập O(1) theo index.
+  std::array<ViolationState, kEventKindCount> kinds_{};
+  // Nhãn bằng chứng theo kind (zone LANE / line REVERSE_DIRECTION). Tách khỏi
+  // ViolationState để struct đó giữ nguyên POD và không cấp phát.
+  std::array<std::string, kEventKindCount> kind_label_{};
   Point last_anchor_;
   bool has_last_anchor_ = false;
   std::vector<Point> anchor_history_;
-  double wrong_way_hit_at_s_ = 0.0;     // lúc cắt vạch (0 = chưa vi phạm)
-  double wrong_way_paired_at_s_ = 0.0;  // lúc đủ CẢ biển + vi phạm
   // Chuỗi biển raw → điểm mẫu tốt nhất (phatnguoi _sample_by_plate).
   std::map<std::string, SnapshotScore> samples_by_plate_;
   std::string best_snapshot_key_;

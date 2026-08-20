@@ -96,9 +96,12 @@ bool TrackPlateState::finalizePlate(double now_s) {
     return isPlateValid(text, styles);
   });
   has_final_plate_ = true;
+  // Normalize 1 lần tại đây: plate_ bất biến sau khi chốt, nên collectReady
+  // không phải normalize lại mỗi frame cho mỗi track.
+  emit_plate_ = normalizePlateForEmit(plate_, styles_);
   if (now_s > 0.0) final_at_s_ = now_s;
   // Biển đến sau vi phạm → cặp đã đủ ngay tại đây.
-  if (wrong_way_hits_ > 0 && now_s > 0.0) setWrongWayPairedAt(now_s);
+  if (kind(EventKind::kWrongWay).hits > 0 && now_s > 0.0) setWrongWayPairedAt(now_s);
   pickBestSnapshotKey();
   return true;
 }
@@ -164,15 +167,57 @@ double TrackPlateState::ageS(double now_s) const {
 }
 
 bool TrackPlateState::shouldRetryMissPush(double now_s) const {
-  return has_final_plate_ && !is_pushed_ && !in_polygon_ &&
+  return has_final_plate_ && !isPushed() && !in_polygon_ &&
          idleOutOfZoneS(now_s) > kMissTrackIdleS;
 }
 
 bool TrackPlateState::shouldForceDelete(double now_s) const {
-  if (is_posted_) return true;
+  if (isPosted()) return true;
   if (!in_polygon_ && idleOutOfZoneS(now_s) > kForceDeleteIdleS) return true;
   if (ageS(now_s) > kForceDeleteAgeS) return true;
   return false;
+}
+
+void TrackPlateState::addKindHit(EventKind k, double now_s, int detail,
+                                 const std::string& label) {
+  ViolationState& v = kinds_[kindIndex(k)];
+  ++v.hits;
+  if (detail > v.detail) v.detail = detail;
+  if (v.first_hit_at_s <= 0.0 && now_s > 0.0) v.first_hit_at_s = now_s;
+  // Nhãn bằng chứng ghi 1 lần — lần vi phạm đầu tiên là lần đáng tin nhất.
+  std::string& slot = kind_label_[kindIndex(k)];
+  if (slot.empty() && !label.empty()) slot = label;
+  // Chưa có ảnh lúc vi phạm → yêu cầu probe chụp.
+  if (!v.has_snapshot) v.needs_snapshot = true;
+}
+
+void TrackPlateState::clearKind(EventKind k) {
+  kinds_[kindIndex(k)] = ViolationState{};
+  kind_label_[kindIndex(k)].clear();
+}
+
+void TrackPlateState::markAllPosted() {
+  for (ViolationState& v : kinds_) {
+    v.pushed = true;
+    v.posted = true;
+  }
+}
+
+EventKindMask TrackPlateState::activeKinds() const {
+  EventKindMask m = 0;
+  if (has_final_plate_) m |= kindBit(EventKind::kPlate);
+  for (size_t i = kindIndex(EventKind::kPlate) + 1; i < kEventKindCount; ++i) {
+    if (kinds_[i].hits > 0) m |= static_cast<EventKindMask>(1u << i);
+  }
+  return m;
+}
+
+EventKindMask TrackPlateState::pendingKinds() const {
+  EventKindMask m = activeKinds();
+  for (size_t i = 0; i < kEventKindCount; ++i) {
+    if (kinds_[i].posted) m &= static_cast<EventKindMask>(~(1u << i));
+  }
+  return m;
 }
 
 void TrackPlateState::addClass(int cls, double conf) {
@@ -181,14 +226,15 @@ void TrackPlateState::addClass(int cls, double conf) {
 
 void TrackPlateState::addHelmetObservation(int no_helmet_count) {
   if (no_helmet_count <= 0) return;
-  ++no_helmet_frames_;
-  if (no_helmet_count > max_no_helmet_count_) max_no_helmet_count_ = no_helmet_count;
+  // NO_HELMET dùng ảnh chung của track (trạng thái kéo dài, không phải sự kiện
+  // tức thời) → không đặt needs_snapshot.
+  ViolationState& v = kindMut(EventKind::kNoHelmet);
+  ++v.hits;
+  if (no_helmet_count > v.detail) v.detail = no_helmet_count;
 }
 
 void TrackPlateState::addWrongLaneObservation(const std::string& zone_name) {
-  ++wrong_lane_frames_;
-  if (wrong_lane_zone_.empty()) wrong_lane_zone_ = zone_name;
-  if (!has_wrong_lane_snapshot_) needs_wrong_lane_snapshot_ = true;
+  addKindHit(EventKind::kWrongLane, 0.0, 0, zone_name);
 }
 
 void TrackPlateState::pushAnchorHistory(const Point& p) {
@@ -234,10 +280,7 @@ bool TrackPlateState::isStationary() const {
 }
 
 void TrackPlateState::addWrongWayObservation(const std::string& line_name, double now_s) {
-  ++wrong_way_hits_;
-  if (wrong_way_line_.empty()) wrong_way_line_ = line_name;
-  if (!has_wrong_way_snapshot_) needs_wrong_way_snapshot_ = true;
-  if (wrong_way_hit_at_s_ <= 0.0 && now_s > 0.0) wrong_way_hit_at_s_ = now_s;
+  addKindHit(EventKind::kWrongWay, now_s, 0, line_name);
   // Vi phạm đến sau biển → cặp đã đủ ngay tại đây.
   if (has_final_plate_ && now_s > 0.0) setWrongWayPairedAt(now_s);
 }

@@ -199,6 +199,97 @@ void testTrackPlateState() {
 }
 
 // ---------------------------------------------------------------------------
+// TrackPlateState — vòng đời per-kind
+// ---------------------------------------------------------------------------
+void testKindLifecycle() {
+  std::printf("== vòng đời per-kind ==\n");
+  using vehicle::business::plate::EventKind;
+  namespace p = vehicle::business::plate;
+
+  {
+    TrackPlateState st(20, 0.0);
+    checkEqInt(st.activeKinds(), 0, "track mới: không kind nào active");
+    check(st.allSettled(), "track mới: allSettled() true (chưa có gì để bắn)");
+
+    st.addWrongWayObservation("REVERSE_DIRECTION", 5.0);
+    checkEqInt(st.kind(EventKind::kWrongWay).hits, 1, "WRONG_WAY: hits = 1");
+    checkEq(st.kindLabel(EventKind::kWrongWay), "REVERSE_DIRECTION", "WRONG_WAY: nhãn line");
+    check(st.kind(EventKind::kWrongWay).needs_snapshot,
+          "WRONG_WAY: cần ảnh bằng chứng riêng");
+    check(st.kind(EventKind::kWrongWay).first_hit_at_s == 5.0, "WRONG_WAY: mốc hit đầu");
+    check(!st.allSettled(), "có vi phạm chưa bắn → allSettled() false");
+
+    // Nhãn chỉ ghi lần đầu.
+    st.addWrongWayObservation("LINE_KHAC", 6.0);
+    checkEqInt(st.kind(EventKind::kWrongWay).hits, 2, "WRONG_WAY: hits tăng");
+    checkEq(st.kindLabel(EventKind::kWrongWay), "REVERSE_DIRECTION",
+            "WRONG_WAY: nhãn giữ lần đầu");
+  }
+
+  {
+    // Cờ per-kind độc lập: posted kind này không ảnh hưởng kind kia.
+    TrackPlateState st(21, 0.0);
+    st.addWrongLaneObservation("CAR_TRUCK_LANE");
+    st.addHelmetObservation(2);
+    checkEqInt(st.kind(EventKind::kNoHelmet).detail, 2, "NO_HELMET: detail = số người");
+    check(!st.kind(EventKind::kNoHelmet).needs_snapshot,
+          "NO_HELMET dùng ảnh chung, không cần ảnh riêng");
+
+    st.markPosted(EventKind::kWrongLane);
+    check(st.kind(EventKind::kWrongLane).posted, "WRONG_LANE đã posted");
+    check(!st.kind(EventKind::kNoHelmet).posted, "NO_HELMET chưa posted (độc lập)");
+    check(!st.allSettled(), "còn NO_HELMET chưa bắn → chưa settled");
+    st.markPosted(EventKind::kNoHelmet);
+    check(st.allSettled(), "mọi kind active đã posted → allSettled()");
+  }
+
+  {
+    // clearKind bỏ riêng 1 vế, các kind khác nguyên vẹn.
+    TrackPlateState st(22, 0.0);
+    st.addWrongWayObservation("REVERSE_DIRECTION", 1.0);
+    st.addWrongLaneObservation("CAR_LANE");
+    st.clearKind(EventKind::kWrongWay);
+    checkEqInt(st.kind(EventKind::kWrongWay).hits, 0, "clearKind: WRONG_WAY về 0");
+    checkEq(st.kindLabel(EventKind::kWrongWay), "", "clearKind: nhãn WRONG_WAY xoá");
+    checkEqInt(st.kind(EventKind::kWrongLane).hits, 1, "clearKind: WRONG_LANE nguyên vẹn");
+  }
+
+  {
+    // emitPlate: normalize sẵn lúc chốt.
+    TrackPlateState st(23, 0.0, 2);
+    st.onEnterPolygon(0.0);
+    st.addOcrReading(makeChars("14A12345"), "14A12345", 1.0, 0.9, 100.0, 40.0);
+    st.addOcrReading(makeChars("14A12345"), "14A12345", 2.0, 0.9, 100.0, 40.0);
+    check(st.hasFinalPlate(), "emitPlate: đã chốt");
+    checkEq(st.emitPlate(), p::normalizePlateForEmit(st.plate()),
+            "emitPlate() khớp normalizePlateForEmit(plate())");
+  }
+
+  {
+    // Rendezvous: vi phạm đến TRƯỚC biển.
+    TrackPlateState st(24, 0.0, 2);
+    st.addWrongWayObservation("REVERSE_DIRECTION", 1.0);
+    check(st.wrongWayPairedAtS() == 0.0, "vi phạm trước: chưa paired (thiếu biển)");
+    st.onEnterPolygon(2.0);
+    st.addOcrReading(makeChars("14A12345"), "14A12345", 2.0, 0.9, 100.0, 40.0);
+    st.addOcrReading(makeChars("14A12345"), "14A12345", 3.0, 0.9, 100.0, 40.0);
+    check(st.hasFinalPlate(), "vi phạm trước: biển đã chốt");
+    check(st.wrongWayPairedAtS() == 3.0, "vi phạm trước: chốt biển làm đủ cặp");
+  }
+
+  {
+    // Rendezvous: biển đến TRƯỚC vi phạm.
+    TrackPlateState st(25, 0.0, 2);
+    st.onEnterPolygon(0.0);
+    st.addOcrReading(makeChars("14A12345"), "14A12345", 1.0, 0.9, 100.0, 40.0);
+    st.addOcrReading(makeChars("14A12345"), "14A12345", 2.0, 0.9, 100.0, 40.0);
+    check(st.hasFinalPlate(), "biển trước: đã chốt");
+    st.addWrongWayObservation("REVERSE_DIRECTION", 7.0);
+    check(st.wrongWayPairedAtS() == 7.0, "biển trước: vi phạm làm đủ cặp");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // TrackPlateState — hình học WRONG_WAY
 // ---------------------------------------------------------------------------
 void testMotion() {
@@ -278,6 +369,7 @@ int main() {
   testRules();
   testDedupCache();
   testTrackPlateState();
+  testKindLifecycle();
   testMotion();
   testCollectReady();
 

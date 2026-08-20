@@ -5,11 +5,32 @@
 #include <stdexcept>
 #include <utility>
 
+#include "business/violation/constants.h"
 #include "utils/string_utils.h"
 
 namespace vehicle {
 namespace business {
 namespace plate {
+
+const char* eventKindCode(EventKind k) {
+  switch (k) {
+    case EventKind::kNoHelmet: return violation::kNoHelmet;
+    case EventKind::kWrongLane: return violation::kWrongLane;
+    case EventKind::kWrongWay: return violation::kWrongWay;
+    default: return nullptr;  // kPlate không phải vi phạm
+  }
+}
+
+const char* eventKindName(EventKind k) {
+  switch (k) {
+    case EventKind::kPlate: return "PLATE";
+    case EventKind::kNoHelmet: return "NO_HELMET";
+    case EventKind::kWrongLane: return "WRONG_LANE";
+    case EventKind::kWrongWay: return "WRONG_WAY";
+    default: return "?";
+  }
+}
+
 namespace {
 
 // Rule 2 ký tự đầu: prefix số ∈ DIGIT_CAR → invalid; prefix chữ phải ∈ ALPHA_ARMY.
