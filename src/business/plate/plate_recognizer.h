@@ -87,8 +87,9 @@ class PlateRecognizer {
   void setWrongWayTiming(double settle_s, double wait_pair_s);
   // Góc lệch tối đa (độ) giữa hướng chuyển động và direction_vector để tính vi phạm.
   void setWrongWayMaxAngle(double max_angle_deg);
-  // Bỏ các track đã cắt vạch nhưng quá hạn vẫn không có biển. Trả số track bỏ.
-  size_t dropStaleWrongWay(double now_s);
+  // Track đã cắt vạch nhưng quá hạn vẫn thiếu vế còn lại (biển hoặc ảnh) → bỏ
+  // RIÊNG vế WRONG_WAY, track vẫn sống cho các nghiệp vụ khác. Trả số vế đã bỏ.
+  size_t clearStaleWrongWay(double now_s);
   // Đã chốt biển, chưa emit — cần (hoặc đang chờ) snapshot vehicle.
   bool awaitingSnapshot(uint64_t track_id) const;
 

@@ -287,6 +287,36 @@ void testKindLifecycle() {
   }
 
   {
+    // shouldForceDelete: track còn kind chưa bắn thì KHÔNG bị xoá sớm.
+    TrackPlateState st(26, 0.0, 2);
+    st.onEnterPolygon(0.0);
+    st.addOcrReading(makeChars("14A12345"), "14A12345", 1.0, 0.9, 100.0, 40.0);
+    st.addOcrReading(makeChars("14A12345"), "14A12345", 2.0, 0.9, 100.0, 40.0);
+    st.addWrongWayObservation("REVERSE_DIRECTION", 2.0);
+    check(!st.shouldForceDelete(3.0), "còn WRONG_WAY chưa bắn → chưa xoá track");
+
+    st.markPosted(EventKind::kPlate);
+    check(!st.shouldForceDelete(3.0), "PLATE đã bắn nhưng WRONG_WAY chưa → vẫn giữ track");
+
+    st.markPosted(EventKind::kWrongWay);
+    check(st.shouldForceDelete(3.0), "mọi kind đã bắn → xoá track");
+  }
+
+  {
+    // Trần tuyệt đối vẫn giữ: track kẹt vì kind không bao giờ posted vẫn bị xoá.
+    TrackPlateState st(27, 0.0, 2);
+    st.onEnterPolygon(0.0);
+    st.addOcrReading(makeChars("14A12345"), "14A12345", 1.0, 0.9, 100.0, 40.0);
+    st.addOcrReading(makeChars("14A12345"), "14A12345", 2.0, 0.9, 100.0, 40.0);
+    st.addWrongWayObservation("REVERSE_DIRECTION", 2.0);
+    st.onLeavePolygon(3.0);
+    check(st.shouldForceDelete(3.0 + p::kForceDeleteIdleS + 1.0),
+          "kẹt ngoài zone quá kForceDeleteIdleS → vẫn xoá (không rò rỉ)");
+    check(st.shouldForceDelete(p::kForceDeleteAgeS + 1.0),
+          "quá kForceDeleteAgeS → vẫn xoá (không rò rỉ)");
+  }
+
+  {
     // emitPlate: normalize sẵn lúc chốt.
     TrackPlateState st(23, 0.0, 2);
     st.onEnterPolygon(0.0);
@@ -388,10 +418,66 @@ void testCollectReady() {
   }
 
   // Chưa commit thì lần gọi sau vẫn trả lại (retry throttle cho phép).
-  rec.commitEmit(track, "14A12345");
+  rec.commitEmit(track, "14A12345", 5.0);
   const std::vector<p::PendingEmit> after = rec.collectReady(6.0);
   checkEqInt(static_cast<long long>(after.size()), 0,
              "sau commitEmit: track không còn trong collectReady");
+}
+
+// ---------------------------------------------------------------------------
+// clearStaleWrongWay — quá hạn chỉ bỏ vế WRONG_WAY, track vẫn bắn được PLATE
+// ---------------------------------------------------------------------------
+void testClearStaleWrongWay() {
+  std::printf("== clearStaleWrongWay ==\n");
+  namespace p = vehicle::business::plate;
+
+  vehicle::PlateConfig cfg;
+  cfg.max_recognize_times = 2;
+  cfg.send_mode = 2;
+  p::PlateRecognizer rec(cfg);
+  rec.setWrongWayTiming(/*settle_s=*/0.0, /*wait_pair_s=*/5.0);
+
+  // Vạch cấm nằm ngang tại y=100, chiều CẤM là đi xuống (+y).
+  std::vector<p::WrongWayLine> lines;
+  {
+    p::WrongWayLine ln;
+    ln.a = vehicle::Point{0.0, 100.0};
+    ln.b = vehicle::Point{200.0, 100.0};
+    ln.direction = vehicle::Point{0.0, 1.0};
+    ln.name = "REVERSE_DIRECTION";
+    lines.push_back(ln);
+  }
+
+  const uint64_t track = 200;
+  rec.observeVehicle(track, 0, 0.9, /*in_zone=*/true, 1.0);
+
+  // Xe đi xuống, cắt vạch y=100 đúng chiều cấm. Cần đủ history để qua tầng lọc
+  // isStationary + motionVector.
+  rec.observeWrongWay(track, vehicle::Point{100.0, 80.0}, lines, 1.0);
+  rec.observeWrongWay(track, vehicle::Point{100.0, 88.0}, lines, 1.0);
+  rec.observeWrongWay(track, vehicle::Point{100.0, 96.0}, lines, 1.0);
+  const bool hit = rec.observeWrongWay(track, vehicle::Point{100.0, 104.0}, lines, 1.0);
+  check(hit, "xe cắt vạch đúng chiều cấm → ghi nhận WRONG_WAY");
+
+  rec.addOcrReading(track, makeChars("14A12345"), "14A12345", 1.0, 0.9, 100.0, 40.0);
+  rec.addOcrReading(track, makeChars("14A12345"), "14A12345", 2.0, 0.9, 100.0, 40.0);
+
+  checkEqInt(static_cast<long long>(rec.clearStaleWrongWay(3.0)), 0,
+             "chưa quá wait_pair_s: không bỏ vế nào");
+
+  // Quá 5s kể từ lúc cắt vạch → bỏ RIÊNG vế WRONG_WAY.
+  checkEqInt(static_cast<long long>(rec.clearStaleWrongWay(7.0)), 1,
+             "quá wait_pair_s: bỏ đúng 1 vế WRONG_WAY");
+
+  // Điểm mấu chốt của B1: track PHẢI còn sống và bắn được event PLATE.
+  const std::vector<p::PendingEmit> ready = rec.collectReady(8.0);
+  checkEqInt(static_cast<long long>(ready.size()), 1,
+             "sau khi bỏ vế WRONG_WAY: track vẫn bắn được PLATE");
+  if (!ready.empty()) {
+    checkEqInt(static_cast<long long>(ready[0].wrong_way_hits), 0,
+               "vế WRONG_WAY đã sạch, không bắn nhầm");
+    checkEq(ready[0].plate, "14A12345", "biển vẫn nguyên vẹn");
+  }
 }
 
 }  // namespace
@@ -404,6 +490,7 @@ int main() {
   testKindLifecycle();
   testMotion();
   testCollectReady();
+  testClearStaleWrongWay();
 
   std::printf("\n%d/%d case pass", g_total - g_failed, g_total);
   if (g_failed > 0) {

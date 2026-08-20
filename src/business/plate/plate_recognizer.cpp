@@ -177,26 +177,26 @@ void PlateRecognizer::setWrongWayMaxAngle(double max_angle_deg) {
   ww_max_angle_deg_ = max_angle_deg;
 }
 
-size_t PlateRecognizer::dropStaleWrongWay(double now_s) {
+size_t PlateRecognizer::clearStaleWrongWay(double now_s) {
   if (ww_wait_pair_s_ <= 0.0) return 0;
   std::lock_guard<std::mutex> lock(mutex_);
-  size_t dropped = 0;
+  size_t cleared = 0;
   for (auto& entry : tracks_) {
     TrackPlateState& state = entry.second;
-    if (state.isPushed() || state.isPosted()) continue;
-    if (state.wrongWayHits() <= 0) continue;
-    const double hit_at = state.wrongWayHitAtS();
-    if (hit_at <= 0.0 || now_s < hit_at + ww_wait_pair_s_) continue;
+    const ViolationState& ww = state.kind(EventKind::kWrongWay);
+    if (ww.hits <= 0 || ww.posted) continue;
+    if (ww.first_hit_at_s <= 0.0 || now_s < ww.first_hit_at_s + ww_wait_pair_s_) continue;
 
-    LOG_INFO("track %lu: WRONG_WAY quá %.1fs %s — bỏ track",
+    // Chỉ bỏ vế WRONG_WAY. Track vẫn sống để PLATE/NO_HELMET/WRONG_LANE bắn
+    // bình thường — chúng không cần crop biển của riêng nghiệp vụ ngược chiều.
+    LOG_INFO("track %lu: WRONG_WAY quá %.1fs %s — bỏ RIÊNG vế ngược chiều",
              static_cast<unsigned long>(entry.first), ww_wait_pair_s_,
              state.hasFinalPlate() ? "không đủ ảnh (crop biển + full-frame)"
                                    : "không có biển số");
-    state.markPushed();
-    state.markPosted();
-    ++dropped;
+    state.clearKind(EventKind::kWrongWay);
+    ++cleared;
   }
-  return dropped;
+  return cleared;
 }
 
 PlateOcrStatus PlateRecognizer::addOcrReading(uint64_t track_id, const CharSequence& chars,

@@ -1252,7 +1252,7 @@ GstPadProbeReturn PlateProbe::handleImages(GstPadProbeInfo* info) {
     state->manager->finalizeMissed(now_s);
 
     // Cắt vạch rồi mà quá hạn vẫn không có biển số → bỏ track, không bắn event.
-    if (wrong_way_cfg.enabled) state->manager->dropStaleWrongWay(now_s);
+    if (wrong_way_cfg.enabled) state->manager->clearStaleWrongWay(now_s);
 
     for (const business::plate::PendingEmit& pending : state->manager->collectReady(now_s)) {
       JpegImage full;

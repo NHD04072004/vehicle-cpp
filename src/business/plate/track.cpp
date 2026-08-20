@@ -172,7 +172,11 @@ bool TrackPlateState::shouldRetryMissPush(double now_s) const {
 }
 
 bool TrackPlateState::shouldForceDelete(double now_s) const {
-  if (isPosted()) return true;
+  // Chỉ xoá khi MỌI nghiệp vụ đang active đã chốt. Track đã bắn PLATE nhưng còn
+  // WRONG_WAY chờ ảnh phải sống tiếp, nếu không sẽ mất vế còn lại.
+  if (has_final_plate_ && allSettled()) return true;
+  // Hai cổng dưới là trần tuyệt đối: track kẹt vì kind nào đó không bao giờ
+  // posted vẫn bị xoá, không rò rỉ.
   if (!in_polygon_ && idleOutOfZoneS(now_s) > kForceDeleteIdleS) return true;
   if (ageS(now_s) > kForceDeleteAgeS) return true;
   return false;
