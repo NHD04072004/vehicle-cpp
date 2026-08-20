@@ -1991,3 +1991,163 @@ flowchart TD
 
 **Test**: 107/107 pass. Ba case chứng minh trực tiếp mô hình mới — chốt riêng WRONG_LANE thì
 PLATE/NO_HELMET vẫn sẵn sàng; publish fail thì `settleKinds` gỡ khoá dedup để retry được.
+
+---
+
+## Commit 6 — retry per-kind ở tầng publisher
+
+`canPublishXxx` trả `bool` gộp **hai ý nghĩa khác hẳn nhau**, và `publishViolations` gom
+chúng vào một cờ `any_failed` cho cả track. Đây là gốc của bug bắn trùng event.
+
+```mermaid
+flowchart TD
+    subgraph B["TRƯỚC — bool gộp"]
+        direction TB
+        B1["canPublishNoHelmet / WrongLane / WrongWay<br/>→ <b>bool</b>"]
+        B2["🔴 false = <b>HAI thứ khác nhau</b><br/>① min_hits chưa đủ / VMS chưa bật mã<br/>&nbsp;&nbsp;&nbsp;→ chốt VĨNH VIỄN, thử lại vô ích<br/>② MQTT publish lỗi<br/>&nbsp;&nbsp;&nbsp;→ lỗi TẠM, phải thử lại"]
+        B3["🔴 any_failed gộp → return bool cho CẢ track"]
+        B4["🔴 markPosted không được gọi"]
+        B5["💀 retry bắn LẠI cả violation<br/>đã publish thành công<br/><i>→ trùng event ở VMS</i>"]
+        B1 --> B2 --> B3 --> B4 --> B5
+    end
+
+    subgraph A["SAU — 3 trạng thái + mask"]
+        direction TB
+        A1["🔵 <b>PublishOutcome</b><br/>kOk · kSkipped · kRetry"]
+        A2["🔵 canPublish(camera, emit, <b>kind</b>)<br/><i>gộp 3 hàm gần trùng thành 1</i>"]
+        A3["🔵 publishViolationKind(kind)<br/>kOk / kSkipped → <b>done |= kindBit</b><br/>kRetry → để lại"]
+        A4["🔵 publishPlateEvent trả <b>EventKindMask</b>"]
+        A5["🔵 settleKinds(track, want, done)<br/>done → markPosted(k)<br/>want &amp; ~done → unmarkPushed + dedup.forget"]
+        A6["✅ kind lỗi retry RIÊNG nó<br/>kind đã xong KHÔNG bắn lại"]
+        A1 --> A2 --> A3 --> A4 --> A5 --> A6
+    end
+
+    B ==>|"fix"| A
+
+    style B2 fill:#ffcccc
+    style B3 fill:#ffcccc
+    style B4 fill:#ffcccc
+    style B5 fill:#ff9999
+    style A1 fill:#cce5ff
+    style A2 fill:#cce5ff
+    style A3 fill:#cce5ff
+    style A5 fill:#cce5ff
+    style A6 fill:#d4f4d4
+```
+
+Sửa kèm: cổng upload chung đổi `return false` → `return 0`; bổ sung `canPublish(kWrongWay)`
+vào phép kiểm `has_violation` (trước đây thiếu, nên track chỉ vi phạm ngược chiều bắn thừa
+một event phương tiện).
+
+---
+
+## Commit 7 — `zones` không bị xoá bởi payload chỉ có `lines`
+
+```mermaid
+flowchart LR
+    P["VMS gửi payload<br/>CHỈ có mảng lines"]
+    subgraph B["TRƯỚC"]
+        B1["ZoneSet set;  ← dựng MỚI, zones rỗng"]
+        B2["🔴 zones_[camera] = set  (gán ĐÈ)"]
+        B3["💀 polygon PLATE bị xoá sạch"]
+        B4["handleMeta thấy polygons.empty()<br/>→ bỏ frame ngay từ đầu"]
+        B5["💀 mất OCR + TOÀN BỘ vi phạm<br/><i>tới lần cập nhật zone tiếp theo</i>"]
+        B1 --> B2 --> B3 --> B4 --> B5
+    end
+    subgraph A["SAU"]
+        A1["🔵 array == nullptr<br/>→ set.zones = cache.zones"]
+        A2["🔵 lines_array == nullptr<br/>→ set.lines = cache.lines"]
+        A3["✅ chỉ ghi đè phần payload MANG THEO"]
+        A1 --> A3
+        A2 --> A3
+    end
+    P --> B
+    P --> A
+
+    style B2 fill:#ffcccc
+    style B3 fill:#ff9999
+    style B5 fill:#ff9999
+    style A1 fill:#cce5ff
+    style A2 fill:#cce5ff
+    style A3 fill:#d4f4d4
+```
+
+Đối xứng: payload chỉ có `zones` sẽ xoá line REVERSE_DIRECTION → WRONG_WAY ngừng chạy im lặng.
+
+---
+
+## Commit 9 — `direction` không bị scale méo góc
+
+```mermaid
+flowchart TD
+    L["line REVERSE_DIRECTION<br/>direction_vector = (1,1) — chiều cấm 45°"]
+
+    subgraph B["TRƯỚC"]
+        B1["🔴 out.direction = {dir.x * <b>frame_w</b>,<br/>&nbsp;&nbsp;dir.y * <b>frame_h</b>}<br/><i>nhân VÔ ĐIỀU KIỆN</i>"]
+        B2["(1,1) × (1920,1080) → (1920,1080)"]
+        B3["🔴 góc thật 45° → đo được <b>29.4°</b><br/>lệch <b>15.6°</b>"]
+        B4["🔴 nhánh non-normalized: điểm scale bằng sx,<br/>direction scale bằng frame_w<br/><i>→ hai hệ toạ độ khác nhau</i>"]
+        B5["💀 angleBetweenDeg(motion, direction)<br/>so với max_angle_deg=40 <b>SAI CẢ HAI CHIỀU</b><br/>bỏ sót xe vi phạm / bắt nhầm xe đúng"]
+        B1 --> B2 --> B3 --> B5
+        B1 --> B4 --> B5
+    end
+
+    subgraph A["SAU"]
+        A1["🔵 out.direction = line.direction<br/><i>giữ nguyên vector gốc</i>"]
+        A2["🟢 angleBetweenDeg TỰ chuẩn hoá:<br/>cos = (v1·v2) / (|v1|·|v2|)<br/>→ chỉ cần đúng HƯỚNG"]
+        A3["✅ góc đo đúng, ngưỡng 40° có nghĩa"]
+        A1 --> A2 --> A3
+    end
+
+    L --> B
+    L --> A
+
+    style B1 fill:#ffcccc
+    style B3 fill:#ffcccc
+    style B4 fill:#ffcccc
+    style B5 fill:#ff9999
+    style A1 fill:#cce5ff
+    style A2 fill:#d4f4d4
+    style A3 fill:#d4f4d4
+```
+
+> Comment cũ nói "chỉ cần đúng dấu" — điều đó chỉ đúng nếu dùng **tích vô hướng**. Code dùng
+> **góc**, nên độ lớn tương đối giữa x và y có ý nghĩa. Test có case chứng minh trực tiếp.
+
+---
+
+## Commit 8 — dọn dẹp
+
+Giảm ròng **37 dòng** sau khi cấu trúc per-kind đã ổn định:
+
+| Việc | Trước | Sau |
+|---|---|---|
+| Forwarder tạm | `markPushed()/markPosted()/isPushed()/isPosted()` không tham số | xoá; `awaitingSnapshot` dùng `pendingKinds() != 0` |
+| Snapshot API | 4 hàm `needs/markWrongLane…` + `needs/markWrongWay…` | 2 hàm nhận `EventKind` |
+| Chụp ảnh bằng chứng | 2 khối gần trùng trong `handleMeta` | 1 helper `submitViolationSnapshot` |
+| Cổng publish | 3 hàm `canPublishNoHelmet/WrongLane/WrongWay` | 1 `canPublish(camera, emit, kind)` |
+| Mã chết | 6 ký hiệu không caller | xoá |
+
+Sáu ký hiệu chết: `PlateProbe::hasWrongWayLine`, `utils::directionDot`,
+`TrackPlateState::shouldRetryMissPush`, `PlateRecognizer::hasSnapshotSamples`,
+`anchorHistory()`, `last_sample_area_`. Hai cái đầu là dấu vết của lần refactor WRONG_WAY
+trước — viết ra rồi thay bằng cách khác nhưng không xoá.
+
+---
+
+## Tổng kết Giai đoạn 1+2 (9 commit)
+
+| # | Commit | Bug được đóng |
+|---|---|---|
+| 0 | khôi phục unit test | — (lưới an toàn; 2 case FAIL cố ý làm bằng chứng bug dedup) |
+| 1 | EventKind + ViolationState | — (nền tảng, hành vi không đổi) |
+| 2 | DedupCache bộ ba + TTL | **Xe thứ hai bị nuốt khi trùng chuỗi biển** |
+| 3 | clearStaleWrongWay | **B1 nửa sau**: quá hạn WW giết cả track |
+| 4+5 | ReadyEmit per-kind | **B1 nửa đầu**: thiếu ảnh WW chặn 3 event kia |
+| 6 | retry per-kind | **Bắn trùng event đã publish thành công** |
+| 7 | vms_client zones | **Payload lines-only xoá polygon → mất OCR** |
+| 9 | direction không scale | **WRONG_WAY so góc sai cả hai chiều** |
+| 8 | dọn dẹp | — (−37 dòng) |
+
+Test: **113/113 pass**. Mỗi commit đều build debug + chạy `tests/data/test.mp4` trước khi
+sang commit kế tiếp.
