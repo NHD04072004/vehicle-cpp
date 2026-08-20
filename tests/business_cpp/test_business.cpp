@@ -97,31 +97,63 @@ void testRules() {
 void testDedupCache() {
   std::printf("== DedupCache ==\n");
 
+  using vehicle::business::plate::EventKind;
+  const EventKind kP = EventKind::kPlate;
+
   {
     DedupCache cache;
-    check(cache.tryEmit(1, "14A12345"), "lần đầu (track 1) được bắn");
-    check(!cache.tryEmit(1, "14A12345"), "cùng track + cùng biển bị chặn");
+    check(cache.tryEmit(1, "14A12345", kP), "lần đầu (track 1) được bắn");
+    check(!cache.tryEmit(1, "14A12345", kP), "cùng track + cùng biển + cùng kind bị chặn");
   }
 
   {
     // Hai TRACK KHÁC NHAU đọc ra cùng chuỗi biển — hai xe khác nhau, cả hai
     // đều phải được bắn. Rất phổ biến với 'UNKOWN' (biển không đọc được).
     DedupCache cache;
-    check(cache.tryEmit(1, vehicle::business::plate::kUnknownPlate),
+    check(cache.tryEmit(1, vehicle::business::plate::kUnknownPlate, kP),
           "track 1 UNKOWN được bắn");
-    check(cache.tryEmit(2, vehicle::business::plate::kUnknownPlate),
+    check(cache.tryEmit(2, vehicle::business::plate::kUnknownPlate, kP),
           "track 2 UNKOWN cũng phải được bắn (xe khác)");
-    check(cache.tryEmit(3, "14A12345"), "track 3 biển khác được bắn");
-    check(cache.tryEmit(4, "14A12345"), "track 4 cùng biển với track 3 vẫn phải bắn");
+    check(cache.tryEmit(3, "14A12345", kP), "track 3 biển khác được bắn");
+    check(cache.tryEmit(4, "14A12345", kP), "track 4 cùng biển với track 3 vẫn phải bắn");
+  }
+
+  {
+    // Cùng track + cùng biển nhưng KIND khác nhau → mỗi nghiệp vụ bắn riêng.
+    DedupCache cache;
+    check(cache.tryEmit(5, "14A12345", EventKind::kPlate), "track 5: PLATE");
+    check(cache.tryEmit(5, "14A12345", EventKind::kWrongLane),
+          "track 5: WRONG_LANE không bị PLATE chặn");
+    check(cache.tryEmit(5, "14A12345", EventKind::kNoHelmet),
+          "track 5: NO_HELMET không bị chặn");
+    check(!cache.tryEmit(5, "14A12345", EventKind::kWrongLane),
+          "track 5: WRONG_LANE lần hai bị chặn");
+  }
+
+  {
+    // forget: publish fail → gỡ khoá để retry được.
+    DedupCache cache;
+    check(cache.tryEmit(6, "14A12345", kP), "track 6: bắn lần đầu");
+    check(!cache.tryEmit(6, "14A12345", kP), "track 6: bị chặn khi chưa forget");
+    cache.forget(6, "14A12345", kP);
+    check(cache.tryEmit(6, "14A12345", kP), "track 6: sau forget thì retry được");
+  }
+
+  {
+    // TTL: entry hết hạn thì bắn lại được.
+    DedupCache cache(50, /*ttl_s=*/10.0);
+    check(cache.tryEmit(7, "14A12345", kP, /*now_s=*/100.0), "TTL: bắn lúc t=100");
+    check(!cache.tryEmit(7, "14A12345", kP, 105.0), "TTL: t=105 vẫn trong hạn → chặn");
+    check(cache.tryEmit(7, "14A12345", kP, 111.0), "TTL: t=111 quá hạn → bắn lại được");
   }
 
   {
     // maxlen: entry cũ nhất bị đẩy ra, track cũ được bắn lại.
     DedupCache cache(2);
-    check(cache.tryEmit(10, "A"), "cache(2): track 10");
-    check(cache.tryEmit(11, "B"), "cache(2): track 11");
-    check(cache.tryEmit(12, "C"), "cache(2): track 12 đẩy track 10 ra");
-    check(cache.tryEmit(10, "A"), "cache(2): track 10 bắn lại được sau khi bị đẩy ra");
+    check(cache.tryEmit(10, "A", kP), "cache(2): track 10");
+    check(cache.tryEmit(11, "B", kP), "cache(2): track 11");
+    check(cache.tryEmit(12, "C", kP), "cache(2): track 12 đẩy track 10 ra");
+    check(cache.tryEmit(10, "A", kP), "cache(2): track 10 bắn lại được sau khi bị đẩy ra");
   }
 }
 

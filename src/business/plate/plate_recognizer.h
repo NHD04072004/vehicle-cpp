@@ -93,7 +93,7 @@ class PlateRecognizer {
   bool awaitingSnapshot(uint64_t track_id) const;
 
   std::vector<PendingEmit> collectReady(double now_s);
-  bool commitEmit(uint64_t track_id, const std::string& plate);
+  bool commitEmit(uint64_t track_id, const std::string& plate, double now_s = 0.0);
   void markPosted(uint64_t track_id);
   size_t cleanup(double now_s);
 

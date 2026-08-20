@@ -313,23 +313,61 @@ int TrackPlateState::votedCls() const {
   return best->first;
 }
 
-bool DedupCache::alreadyEmitted(uint64_t track_id, const std::string& plate) const {
-  if (std::find(track_ids_.begin(), track_ids_.end(), track_id) != track_ids_.end())
-    return true;
-  return std::find(plates_.begin(), plates_.end(), plate) != plates_.end();
+size_t DedupCache::KeyHash::operator()(const Key& k) const noexcept {
+  // track_id là nguồn entropy chính; plate ngắn (<= 10 ký tự), kind chỉ 2 bit.
+  size_t h = std::hash<uint64_t>{}(k.track_id);
+  h ^= std::hash<std::string>{}(k.plate) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+  h ^= static_cast<size_t>(k.kind) + 0x9e3779b9U + (h << 6) + (h >> 2);
+  return h;
 }
 
-void DedupCache::remember(uint64_t track_id, const std::string& plate) {
-  track_ids_.push_back(track_id);
-  plates_.push_back(plate);
-  while (track_ids_.size() > maxlen_) track_ids_.pop_front();
-  while (plates_.size() > maxlen_) plates_.pop_front();
+void DedupCache::evict(double now_s) {
+  // Entry hết hạn nằm ở đầu FIFO (chèn theo thời gian tăng dần).
+  while (!fifo_.empty()) {
+    auto it = seen_.find(fifo_.front());
+    if (it == seen_.end()) {  // đã bị forget()
+      fifo_.pop_front();
+      continue;
+    }
+    const bool expired = it->second > 0.0 && now_s > 0.0 && now_s >= it->second;
+    if (!expired && seen_.size() <= maxlen_) break;
+    seen_.erase(it);
+    fifo_.pop_front();
+  }
 }
 
-bool DedupCache::tryEmit(uint64_t track_id, const std::string& plate) {
-  if (alreadyEmitted(track_id, plate)) return false;
-  remember(track_id, plate);
+bool DedupCache::alreadyEmitted(uint64_t track_id, const std::string& plate,
+                                EventKind kind, double now_s) const {
+  auto it = seen_.find(Key{track_id, plate, kind});
+  if (it == seen_.end()) return false;
+  // Hết hạn thì coi như chưa từng bắn; evict() sẽ dọn ở lần remember kế tiếp.
+  if (it->second > 0.0 && now_s > 0.0 && now_s >= it->second) return false;
   return true;
+}
+
+void DedupCache::remember(uint64_t track_id, const std::string& plate, EventKind kind,
+                          double now_s) {
+  Key key{track_id, plate, kind};
+  const double expire_at = (now_s > 0.0 && ttl_s_ > 0.0) ? now_s + ttl_s_ : 0.0;
+  auto res = seen_.insert({key, expire_at});
+  if (!res.second) {
+    res.first->second = expire_at;  // gia hạn, không chèn trùng vào FIFO
+    return;
+  }
+  fifo_.push_back(std::move(key));
+  evict(now_s);
+}
+
+bool DedupCache::tryEmit(uint64_t track_id, const std::string& plate, EventKind kind,
+                         double now_s) {
+  if (alreadyEmitted(track_id, plate, kind, now_s)) return false;
+  remember(track_id, plate, kind, now_s);
+  return true;
+}
+
+void DedupCache::forget(uint64_t track_id, const std::string& plate, EventKind kind) {
+  // Chỉ xoá khỏi seen_; entry rác trong fifo_ được evict() bỏ qua khi gặp.
+  seen_.erase(Key{track_id, plate, kind});
 }
 
 }  // namespace plate

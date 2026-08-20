@@ -4,6 +4,7 @@
 #include <deque>
 #include <map>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -234,18 +235,50 @@ class TrackPlateState {
   CropScore last_crop_cand_;
 };
 
+// Chống bắn trùng theo bộ ba (track_id, plate, kind).
+//
+// Bản cũ giữ 2 deque rời và khớp theo OR (trùng track_id HOẶC trùng plate), nên
+// hai XE KHÁC NHAU cùng đọc ra một chuỗi biển thì xe thứ hai bị nuốt hoàn toàn
+// — rất phổ biến với 'UNKOWN'. Khoá theo bộ ba sửa đúng chỗ đó: cùng xe cùng
+// nghiệp vụ mới bị chặn.
+//
+// Tra cứu O(1) trung bình (bản cũ là std::find O(n) chạy 2 lần mỗi track mỗi
+// frame). FIFO giữ trần maxlen; TTL để entry không sống mãi vì tracker có thể
+// tái sử dụng track_id sau thời gian dài.
 class DedupCache {
  public:
-  explicit DedupCache(size_t maxlen = kDedupCacheSize) : maxlen_(maxlen) {}
+  explicit DedupCache(size_t maxlen = kDedupCacheSize, double ttl_s = kDedupTtlS)
+      : maxlen_(maxlen), ttl_s_(ttl_s) {}
 
-  bool alreadyEmitted(uint64_t track_id, const std::string& plate) const;
-  void remember(uint64_t track_id, const std::string& plate);
-  bool tryEmit(uint64_t track_id, const std::string& plate);
+  bool alreadyEmitted(uint64_t track_id, const std::string& plate, EventKind kind,
+                      double now_s = 0.0) const;
+  void remember(uint64_t track_id, const std::string& plate, EventKind kind,
+                double now_s = 0.0);
+  bool tryEmit(uint64_t track_id, const std::string& plate, EventKind kind,
+               double now_s = 0.0);
+  // Publish thất bại → gỡ khoá để lần retry sau không bị chính dedup chặn.
+  void forget(uint64_t track_id, const std::string& plate, EventKind kind);
 
  private:
+  struct Key {
+    uint64_t track_id = 0;
+    std::string plate;
+    EventKind kind = EventKind::kPlate;
+    bool operator==(const Key& o) const {
+      return track_id == o.track_id && kind == o.kind && plate == o.plate;
+    }
+  };
+  struct KeyHash {
+    size_t operator()(const Key& k) const noexcept;
+  };
+
+  // Bỏ entry hết hạn và ép trần maxlen. Amortized O(1).
+  void evict(double now_s);
+
   size_t maxlen_;
-  std::deque<uint64_t> track_ids_;
-  std::deque<std::string> plates_;
+  double ttl_s_;
+  std::unordered_map<Key, double, KeyHash> seen_;  // key → mốc hết hạn (0 = không TTL)
+  std::deque<Key> fifo_;                           // thứ tự chèn, để ép trần
 };
 
 }  // namespace plate

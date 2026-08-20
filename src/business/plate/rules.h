@@ -78,6 +78,9 @@ constexpr double kForceDeleteIdleS = 10.0;
 constexpr double kForceDeleteAgeS = 120.0;
 
 constexpr size_t kDedupCacheSize = 50;
+// Entry dedup sống tối đa ngần này giây. Tracker có thể tái sử dụng track_id
+// sau thời gian dài, nên khoá không được giữ vô hạn.
+constexpr double kDedupTtlS = 300.0;
 
 // Ngưỡng dịch chuyển anchor (px) giữa 2 frame để coi là xe ĐANG di chuyển.
 // Dưới ngưỡng = jitter bbox của xe đứng yên → không tính cắt vạch.

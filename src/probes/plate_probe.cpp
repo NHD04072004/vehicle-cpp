@@ -1300,7 +1300,7 @@ GstPadProbeReturn PlateProbe::handleImages(GstPadProbeInfo* info) {
         continue;
       }
 
-      if (!state->manager->commitEmit(pending.track_id, pending.plate)) continue;
+      if (!state->manager->commitEmit(pending.track_id, pending.plate, now_s)) continue;
 
       if (crop.empty()) {
         LOG_WARN("track %lu: event '%s' không có crop biển (key='%s', %d reading)",

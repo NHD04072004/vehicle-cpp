@@ -297,7 +297,8 @@ std::vector<PendingEmit> PlateRecognizer::collectReady(double now_s) {
       state.markPosted();
       continue;
     }
-    if (dedup_.alreadyEmitted(entry.first, plate)) {
+    // Kind tạm cố định kPlate — tách per-kind ở commit ReadyEmit.
+    if (dedup_.alreadyEmitted(entry.first, plate, EventKind::kPlate, now_s)) {
       LOG_DEBUG("track %lu: '%s' trùng dedup cache",
                 static_cast<unsigned long>(entry.first), plate.c_str());
       state.markPushed();
@@ -314,11 +315,12 @@ std::vector<PendingEmit> PlateRecognizer::collectReady(double now_s) {
   return ready;
 }
 
-bool PlateRecognizer::commitEmit(uint64_t track_id, const std::string& plate) {
+bool PlateRecognizer::commitEmit(uint64_t track_id, const std::string& plate,
+                                 double now_s) {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = tracks_.find(track_id);
   if (it == tracks_.end()) return false;
-  if (!dedup_.tryEmit(track_id, plate)) return false;
+  if (!dedup_.tryEmit(track_id, plate, EventKind::kPlate, now_s)) return false;
   it->second.markPushed();
   return true;
 }
