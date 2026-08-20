@@ -89,11 +89,10 @@ class PlateRecognizer {
   size_t finalizeMissed(double now_s);
 
   std::string bestSnapshotKey(uint64_t track_id) const;
-  bool hasSnapshotSamples(uint64_t track_id) const;
-  bool needsWrongLaneSnapshot(uint64_t track_id) const;
-  void markWrongLaneSnapshotTaken(uint64_t track_id);
-  bool needsWrongWaySnapshot(uint64_t track_id) const;
-  void markWrongWaySnapshotTaken(uint64_t track_id);
+  // Ảnh bằng chứng riêng của 1 nghiệp vụ (WRONG_LANE / WRONG_WAY): chụp đúng
+  // lúc vi phạm, chỉ 1 lần mỗi track.
+  bool needsSnapshot(uint64_t track_id, EventKind kind) const;
+  void markSnapshotTaken(uint64_t track_id, EventKind kind);
   // Cấu hình rendezvous biển ↔ vi phạm ngược chiều (giây).
   void setWrongWayTiming(double settle_s, double wait_pair_s);
   // Góc lệch tối đa (độ) giữa hướng chuyển động và direction_vector để tính vi phạm.

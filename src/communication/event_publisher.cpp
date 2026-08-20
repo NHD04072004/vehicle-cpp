@@ -71,9 +71,9 @@ business::plate::EventKindMask EventPublisher::publishPlateEvent(const Camera& c
 
   // Event phương tiện chỉ bắn khi track KHÔNG có vi phạm nào — giữ nguyên hành
   // vi cũ (event vi phạm đã mang đủ thông tin xe).
-  const bool has_violation = canPublishNoHelmet(camera, emit) ||
-                             canPublishWrongLane(camera, emit) ||
-                             canPublishWrongWay(camera, emit);
+  const bool has_violation = canPublish(camera, emit, EventKind::kNoHelmet) ||
+                             canPublish(camera, emit, EventKind::kWrongLane) ||
+                             canPublish(camera, emit, EventKind::kWrongWay);
   if (has_violation) {
     // PLATE coi như xong: thông tin xe đã nằm trong event vi phạm.
     done |= kindBit(EventKind::kPlate);
@@ -118,48 +118,48 @@ business::plate::EventKindMask EventPublisher::publishPlateEvent(const Camera& c
   return done;
 }
 
-bool EventPublisher::canPublishNoHelmet(const Camera& camera, const PlateEmit& emit) const {
-  const HelmetViolationConfig& helmet = config_.violation().helmet;
-  if (!helmet.enabled) return false;
-  if (emit.vehicle_cls != kClassMotorbike) return false;
-  if (emit.no_helmet_frames < helmet.min_hits) return false;
+bool EventPublisher::canPublish(const Camera& camera, const PlateEmit& emit,
+                                business::plate::EventKind kind) const {
+  using business::plate::EventKind;
 
-  if (violations_ == nullptr ||
-      !violations_->allows(business::violation::kNoHelmet, camera.id)) {
-    LOG_DEBUG("track %lu: NO_HELMET (%d frame) nhưng camera %s chưa bật mã này — bỏ qua",
-              static_cast<unsigned long>(emit.track_id), emit.no_helmet_frames,
-              camera.code.c_str());
-    return false;
+  bool enabled = false;
+  int min_hits = 0;
+  int hits = 0;
+  switch (kind) {
+    case EventKind::kNoHelmet: {
+      const HelmetViolationConfig& cfg = config_.violation().helmet;
+      // Không đội mũ chỉ áp dụng cho xe máy.
+      if (emit.vehicle_cls != kClassMotorbike) return false;
+      enabled = cfg.enabled;
+      min_hits = cfg.min_hits;
+      hits = emit.no_helmet_frames;
+      break;
+    }
+    case EventKind::kWrongLane: {
+      const LaneViolationConfig& cfg = config_.violation().wrong_lane;
+      enabled = cfg.enabled;
+      min_hits = cfg.min_hits;
+      hits = emit.wrong_lane_frames;
+      break;
+    }
+    case EventKind::kWrongWay: {
+      const WrongWayViolationConfig& cfg = config_.violation().wrong_way;
+      enabled = cfg.enabled;
+      min_hits = cfg.min_hits;
+      hits = emit.wrong_way_hits;  // số lần CHẠM line REVERSE_DIRECTION
+      break;
+    }
+    default:
+      return false;  // kPlate không đi đường vi phạm
   }
-  return true;
-}
 
-bool EventPublisher::canPublishWrongLane(const Camera& camera, const PlateEmit& emit) const {
-  const LaneViolationConfig& wrong_lane = config_.violation().wrong_lane;
-  if (!wrong_lane.enabled) return false;
-  if (emit.wrong_lane_frames < wrong_lane.min_hits) return false;
+  if (!enabled || hits < min_hits) return false;
 
-  if (violations_ == nullptr ||
-      !violations_->allows(business::violation::kWrongLane, camera.id)) {
-    LOG_DEBUG("track %lu: WRONG_LANE (%d frame) nhưng camera %s chưa bật mã này — bỏ qua",
-              static_cast<unsigned long>(emit.track_id), emit.wrong_lane_frames,
-              camera.code.c_str());
-    return false;
-  }
-  return true;
-}
-
-bool EventPublisher::canPublishWrongWay(const Camera& camera, const PlateEmit& emit) const {
-  const WrongWayViolationConfig& wrong_way = config_.violation().wrong_way;
-  if (!wrong_way.enabled) return false;
-  // Bắt buộc đã CHẠM line REVERSE_DIRECTION ngược chiều.
-  if (emit.wrong_way_hits < wrong_way.min_hits) return false;
-
-  if (violations_ == nullptr ||
-      !violations_->allows(business::violation::kWrongWay, camera.id)) {
-    LOG_DEBUG("track %lu: WRONG_WAY (%d lần cắt) nhưng camera %s chưa bật mã này — bỏ qua",
-              static_cast<unsigned long>(emit.track_id), emit.wrong_way_hits,
-              camera.code.c_str());
+  const char* code = business::plate::eventKindCode(kind);
+  if (violations_ == nullptr || code == nullptr || !violations_->allows(code, camera.id)) {
+    LOG_DEBUG("track %lu: %s (%d lần) nhưng camera %s chưa bật mã này — bỏ qua",
+              static_cast<unsigned long>(emit.track_id),
+              business::plate::eventKindName(kind), hits, camera.code.c_str());
     return false;
   }
   return true;
@@ -197,14 +197,14 @@ EventPublisher::PublishOutcome EventPublisher::publishViolationKind(
 
   switch (kind) {
     case EventKind::kNoHelmet:
-      if (!canPublishNoHelmet(camera, emit)) return PublishOutcome::kSkipped;
+      if (!canPublish(camera, emit, kind)) return PublishOutcome::kSkipped;
       evidence["road_type"] = "highway";
       // NO_HELMET dùng ảnh chung của track: không mũ là trạng thái kéo dài suốt
       // hành trình, không phải sự kiện tức thời cần ảnh riêng.
       break;
 
     case EventKind::kWrongLane:
-      if (!canPublishWrongLane(camera, emit)) return PublishOutcome::kSkipped;
+      if (!canPublish(camera, emit, kind)) return PublishOutcome::kSkipped;
       evidence["lane_zone"] = emit.wrong_lane_zone;
       params = paramsWithViolationImages(camera, emit, vparams, emit.wrong_lane_full,
                                          emit.wrong_lane_crop, "wrong_lane",
@@ -212,7 +212,7 @@ EventPublisher::PublishOutcome EventPublisher::publishViolationKind(
       break;
 
     case EventKind::kWrongWay:
-      if (!canPublishWrongWay(camera, emit)) return PublishOutcome::kSkipped;
+      if (!canPublish(camera, emit, kind)) return PublishOutcome::kSkipped;
       evidence["line_name"] = emit.wrong_way_line;
       evidence["road_type"] = "highway";
       params = paramsWithViolationImages(camera, emit, vparams, emit.wrong_way_full,

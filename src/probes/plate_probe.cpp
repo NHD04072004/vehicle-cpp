@@ -296,6 +296,31 @@ void PlateProbe::updateCamera(unsigned int source_id, const Camera& camera) {
   it->second->camera = camera;
 }
 
+void PlateProbe::submitViolationSnapshot(SourceState* state, uint64_t track_id,
+                                         business::plate::EventKind kind,
+                                         const char* snapshot_key, float left, float top,
+                                         float width, float height, unsigned int source_id,
+                                         uint64_t frame_num) {
+  // Ảnh bằng chứng phải là frame ĐANG vi phạm, không phải frame biển nét nhất
+  // (lúc đó xe có thể đã ra khỏi làn / qua vạch). Chỉ chụp 1 lần mỗi track.
+  if (state == nullptr || state->manager == nullptr) return;
+  if (!state->manager->needsSnapshot(track_id, kind)) return;
+
+  PendingEncode pend;
+  pend.track_id = track_id;
+  pend.plate_key = snapshot_key;
+  pend.left = left;
+  pend.top = top;
+  pend.width = width;
+  pend.height = height;
+  pend.encode_plate_crop = false;
+  {
+    std::lock_guard<std::mutex> lock(pending_mutex_);
+    pending_frames_[{source_id, frame_num}].push_back(std::move(pend));
+  }
+  state->manager->markSnapshotTaken(track_id, kind);
+}
+
 void PlateProbe::clearPendingFor(unsigned int source_id) {
   std::lock_guard<std::mutex> lock(pending_mutex_);
   for (auto it = pending_frames_.begin(); it != pending_frames_.end();) {
@@ -495,16 +520,6 @@ std::vector<business::plate::WrongWayLine> PlateProbe::wrongWayLinesFor(
     lines.push_back(std::move(out));
   }
   return lines;
-}
-
-bool PlateProbe::hasWrongWayLine(const std::string& camera_code) {
-  std::lock_guard<std::mutex> lock(zones_mutex_);
-  auto it = zones_.find(camera_code);
-  if (it == zones_.end()) return false;
-  for (const Line& line : it->second.lines) {
-    if (isReverseDirectionLine(line.name) && line.has_direction) return true;
-  }
-  return false;
 }
 
 void PlateProbe::warnLineWithoutDirection(const std::string& camera_code, const ZoneSet& set,
@@ -897,19 +912,11 @@ GstPadProbeReturn PlateProbe::handleMeta(GstPadProbeInfo* info) {
           if (lane.allowed_classes.count(vehicle_cls) > 0) continue;  // đúng làn
           if (utils::pointInPolygon(anchor, lane.polygon)) {
             state->manager->observeLane(track_id, lane.zone_name);
-            if (state->manager->needsWrongLaneSnapshot(track_id)) {
-              std::lock_guard<std::mutex> lock(pending_mutex_);
-              PendingEncode pend;
-              pend.track_id = track_id;
-              pend.plate_key = kWrongLaneSnapshotKey;
-              pend.left = vehicle->rect_params.left;
-              pend.top = vehicle->rect_params.top;
-              pend.width = vehicle->rect_params.width;
-              pend.height = vehicle->rect_params.height;
-              pend.encode_plate_crop = false;
-              pending_frames_[{frame->source_id, frame->frame_num}].push_back(std::move(pend));
-              state->manager->markWrongLaneSnapshotTaken(track_id);
-            }
+            submitViolationSnapshot(state, track_id, business::plate::EventKind::kWrongLane,
+                                    kWrongLaneSnapshotKey, vehicle->rect_params.left,
+                                    vehicle->rect_params.top, vehicle->rect_params.width,
+                                    vehicle->rect_params.height, frame->source_id,
+                                    frame->frame_num);
             break;
           }
         }
@@ -919,21 +926,13 @@ GstPadProbeReturn PlateProbe::handleMeta(GstPadProbeInfo* info) {
       // KHÔNG gate theo zone PLATE: phải cập nhật anchor ở MỌI frame thì mới có
       // vị trí frame trước để so — nếu bỏ frame, đoạn di chuyển bị đứt và lần
       // cắt vạch không được ghi nhận. Line cũng có thể nằm ngoài zone PLATE.
-      if (!wrong_way_lines.empty()) {
-        if (state->manager->observeWrongWay(track_id, anchor, wrong_way_lines, now_s) &&
-            state->manager->needsWrongWaySnapshot(track_id)) {
-          std::lock_guard<std::mutex> lock(pending_mutex_);
-          PendingEncode pend;
-          pend.track_id = track_id;
-          pend.plate_key = kWrongWaySnapshotKey;
-          pend.left = vehicle->rect_params.left;
-          pend.top = vehicle->rect_params.top;
-          pend.width = vehicle->rect_params.width;
-          pend.height = vehicle->rect_params.height;
-          pend.encode_plate_crop = false;
-          pending_frames_[{frame->source_id, frame->frame_num}].push_back(std::move(pend));
-          state->manager->markWrongWaySnapshotTaken(track_id);
-        }
+      if (!wrong_way_lines.empty() &&
+          state->manager->observeWrongWay(track_id, anchor, wrong_way_lines, now_s)) {
+        submitViolationSnapshot(state, track_id, business::plate::EventKind::kWrongWay,
+                                kWrongWaySnapshotKey, vehicle->rect_params.left,
+                                vehicle->rect_params.top, vehicle->rect_params.width,
+                                vehicle->rect_params.height, frame->source_id,
+                                frame->frame_num);
       }
 
       if (!in_zone) continue;

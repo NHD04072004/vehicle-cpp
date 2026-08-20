@@ -128,12 +128,18 @@ class PlateProbe {
   std::vector<business::plate::WrongWayLine> wrongWayLinesFor(
       const std::string& camera_code, double frame_w, double frame_h, double source_w,
       double source_h);
-  // true nếu camera có line REVERSE_DIRECTION dùng được (đủ direction).
-  bool hasWrongWayLine(const std::string& camera_code);
   // Cảnh báo 1 lần/version khi ZoneSet không chứa zone PLATE nào.
   void warnMissingPlateZone(const std::string& camera_code, const ZoneSet& set);
   void warnLineWithoutDirection(const std::string& camera_code, const ZoneSet& set,
                                 const std::string& line_name);
+  // Đẩy yêu cầu chụp ảnh bằng chứng cho 1 nghiệp vụ (WRONG_LANE / WRONG_WAY)
+  // tại đúng frame vi phạm. No-op nếu track đã có ảnh của nghiệp vụ đó.
+  // Nhận bbox rời thay vì NvOSD_RectParams để header không phải kéo theo
+  // nvdsmeta.h (chỉ hai struct DeepStream được forward declare ở trên).
+  void submitViolationSnapshot(SourceState* state, uint64_t track_id,
+                               business::plate::EventKind kind, const char* snapshot_key,
+                               float left, float top, float width, float height,
+                               unsigned int source_id, uint64_t frame_num);
   void enqueue(EmitJob job);
   void workerLoop();
   void clearPendingFor(unsigned int source_id);

@@ -86,7 +86,6 @@ class TrackPlateState {
   double idleOutOfZoneS(double now_s) const;
   double ageS(double now_s) const;
 
-  bool shouldRetryMissPush(double now_s) const;
   bool shouldForceDelete(double now_s) const;
 
   // --- Vòng đời per-kind ----------------------------------------------------
@@ -121,14 +120,6 @@ class TrackPlateState {
   void markSnapshotTaken(EventKind k) { kinds_[kindIndex(k)].needs_snapshot = false; }
   void markHasSnapshot(EventKind k) { kinds_[kindIndex(k)].has_snapshot = true; }
 
-  // Forwarder tạm cho call-site chưa chuyển sang per-kind. Ánh xạ vào kPlate —
-  // tương đương hành vi cũ vì mọi nghiệp vụ đang chốt/bắn cùng một lúc.
-  // Bị xoá ở commit dọn dẹp sau khi collectReady đã tách theo kind.
-  void markPushed() { markPushed(EventKind::kPlate); }
-  void markPosted() { markPosted(EventKind::kPlate); }
-  bool isPushed() const { return kind(EventKind::kPlate).pushed; }
-  bool isPosted() const { return kind(EventKind::kPlate).posted; }
-
   void addClass(int cls, double conf = 0.0);
 
   void addHelmetObservation(int no_helmet_count);
@@ -147,7 +138,6 @@ class TrackPlateState {
   // Lịch sử anchor (cũ → mới, tối đa kMotionHistoryLen) để tính vector hướng
   // chuyển động mượt hơn hiệu 2 frame liên tiếp.
   void pushAnchorHistory(const Point& p);
-  const std::vector<Point>& anchorHistory() const { return anchor_history_; }
   // Hướng chuyển động hiện tại; {0,0} nếu chưa đủ điểm hoặc xe đứng yên.
   Point motionVector() const;
   // Xe đang đứng yên: anchor chỉ dao động quanh 1 tâm (sai số detection), không
@@ -183,7 +173,6 @@ class TrackPlateState {
   const std::string& emitPlate() const { return emit_plate_; }
   bool inPolygon() const { return in_polygon_; }
   bool everEnteredPolygon() const { return ever_entered_polygon_; }
-  bool hasSnapshotSamples() const { return !samples_by_plate_.empty(); }
   const CropScore& lastCropCandidate() const { return last_crop_cand_; }
   // Key ảnh sau chốt (chuỗi biển của mẫu được chọn). Rỗng nếu chưa chốt / chưa có mẫu.
   const std::string& bestSnapshotKey() const { return best_snapshot_key_; }
@@ -209,7 +198,6 @@ class TrackPlateState {
   double first_ocr_at_s_ = 0.0;
   double final_at_s_ = 0.0;
   double max_sample_area_ = 0.0;
-  double last_sample_area_ = 0.0;
   bool in_polygon_ = false;
   bool ever_entered_polygon_ = false;
   int plate_recognize_count_ = 0;

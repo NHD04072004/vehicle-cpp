@@ -130,7 +130,6 @@ PlateOcrStatus TrackPlateState::addOcrReading(const CharSequence& chars, const s
   cand.mean_conf =
       mean_conf > 0.0 ? mean_conf : conf_sum / static_cast<double>(chars.size());
   cand.area = std::max(0.0, sample_area);
-  last_sample_area_ = cand.area;
   // Chỉ coi là "đang tiến gần" khi đã có baseline và area tăng >5%.
   const bool area_grew = max_sample_area_ > 0.0 && cand.area > max_sample_area_ * 1.05;
   max_sample_area_ = std::max(max_sample_area_, cand.area);
@@ -164,11 +163,6 @@ double TrackPlateState::idleOutOfZoneS(double now_s) const {
 
 double TrackPlateState::ageS(double now_s) const {
   return std::max(0.0, now_s - created_at_s_);
-}
-
-bool TrackPlateState::shouldRetryMissPush(double now_s) const {
-  return has_final_plate_ && !isPushed() && !in_polygon_ &&
-         idleOutOfZoneS(now_s) > kMissTrackIdleS;
 }
 
 bool TrackPlateState::shouldForceDelete(double now_s) const {

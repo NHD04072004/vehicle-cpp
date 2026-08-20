@@ -31,7 +31,6 @@ std::vector<Point> scaleZone(const std::vector<Point>& points, double frame_w, d
 bool segmentsIntersect(const Point& p1, const Point& p2, const Point& a, const Point& b);
 
 // Vector di chuyển p1→p2 chiếu lên `direction`: > 0 nghĩa là đi CÙNG chiều.
-double directionDot(const Point& p1, const Point& p2, const Point& direction);
 
 // Góc lệch giữa 2 vector, [0,180]. Trả -1 nếu một trong hai vector ~0
 double angleBetweenDeg(const Point& v1, const Point& v2);

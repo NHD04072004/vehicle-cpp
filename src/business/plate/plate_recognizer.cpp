@@ -151,18 +151,18 @@ CropScore PlateRecognizer::lastCropCandidate(uint64_t track_id) const {
   return it->second.lastCropCandidate();
 }
 
-bool PlateRecognizer::needsWrongWaySnapshot(uint64_t track_id) const {
+bool PlateRecognizer::needsSnapshot(uint64_t track_id, EventKind kind) const {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = tracks_.find(track_id);
-  return it != tracks_.end() && it->second.needsWrongWaySnapshot();
+  return it != tracks_.end() && it->second.kind(kind).needs_snapshot;
 }
 
-void PlateRecognizer::markWrongWaySnapshotTaken(uint64_t track_id) {
+void PlateRecognizer::markSnapshotTaken(uint64_t track_id, EventKind kind) {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = tracks_.find(track_id);
   if (it == tracks_.end()) return;
-  it->second.markWrongWaySnapshotTaken();
-  it->second.markHasWrongWaySnapshot();
+  it->second.markSnapshotTaken(kind);
+  it->second.markHasSnapshot(kind);
 }
 
 void PlateRecognizer::setWrongWayTiming(double settle_s, double wait_pair_s) {
@@ -237,37 +237,18 @@ std::string PlateRecognizer::bestSnapshotKey(uint64_t track_id) const {
   return it->second.bestSnapshotKey();
 }
 
-bool PlateRecognizer::hasSnapshotSamples(uint64_t track_id) const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  auto it = tracks_.find(track_id);
-  return it != tracks_.end() && it->second.hasSnapshotSamples();
-}
-
 bool PlateRecognizer::everEnteredPlateZone(uint64_t track_id) const {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = tracks_.find(track_id);
   return it != tracks_.end() && it->second.everEnteredPolygon();
 }
 
-bool PlateRecognizer::needsWrongLaneSnapshot(uint64_t track_id) const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  auto it = tracks_.find(track_id);
-  return it != tracks_.end() && it->second.needsWrongLaneSnapshot();
-}
-
-void PlateRecognizer::markWrongLaneSnapshotTaken(uint64_t track_id) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  auto it = tracks_.find(track_id);
-  if (it == tracks_.end()) return;
-  it->second.markWrongLaneSnapshotTaken();
-  it->second.markHasWrongLaneSnapshot();
-}
-
 bool PlateRecognizer::awaitingSnapshot(uint64_t track_id) const {
   std::lock_guard<std::mutex> lock(mutex_);
   auto it = tracks_.find(track_id);
   if (it == tracks_.end()) return false;
-  return it->second.hasFinalPlate() && !it->second.isPushed() && !it->second.isPosted();
+  // Đã chốt biển mà còn nghiệp vụ nào chưa bắn → vẫn cần ảnh.
+  return it->second.hasFinalPlate() && it->second.pendingKinds() != 0;
 }
 
 EventKindMask PlateRecognizer::readyMaskLocked(TrackPlateState& state, double now_s) {

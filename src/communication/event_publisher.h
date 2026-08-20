@@ -42,9 +42,10 @@ class EventPublisher {
     kRetry,    // lỗi tạm (upload/MQTT) → lần sau thử lại
   };
 
-  bool canPublishNoHelmet(const Camera& camera, const PlateEmit& emit) const;
-  bool canPublishWrongLane(const Camera& camera, const PlateEmit& emit) const;
-  bool canPublishWrongWay(const Camera& camera, const PlateEmit& emit) const;
+  // Nghiệp vụ đủ điều kiện bắn: module bật, đạt min_hits, và VMS đã bật mã cho
+  // camera này. Ba nhánh chỉ khác nhau ở config + trường đếm.
+  bool canPublish(const Camera& camera, const PlateEmit& emit,
+                  business::plate::EventKind kind) const;
 
   // Publish 1 nghiệp vụ vi phạm theo kind. Trả trạng thái để caller gom mask.
   PublishOutcome publishViolationKind(const Camera& camera, const PlateEmit& emit,

@@ -114,10 +114,6 @@ bool segmentsIntersect(const Point& p1, const Point& p2, const Point& a, const P
   return false;
 }
 
-double directionDot(const Point& p1, const Point& p2, const Point& direction) {
-  return (p2.x - p1.x) * direction.x + (p2.y - p1.y) * direction.y;
-}
-
 double angleBetweenDeg(const Point& v1, const Point& v2) {
   const double n1 = std::sqrt(v1.x * v1.x + v1.y * v1.y);
   const double n2 = std::sqrt(v2.x * v2.x + v2.y * v2.y);
