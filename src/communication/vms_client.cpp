@@ -330,6 +330,14 @@ void VmsClient::handleZones(const std::string& camera_code, const std::string& p
   {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = zones_.find(camera_code);
+    // Chỉ ghi đè phần payload thực sự mang theo. Payload chỉ có `lines` mà gán
+    // đè cả ZoneSet sẽ xoá sạch polygon PLATE của camera → handleMeta bỏ mọi
+    // frame, mất OCR và toàn bộ vi phạm cho tới lần cập nhật zone tiếp theo.
+    // Đối xứng: payload chỉ có `zones` sẽ xoá line REVERSE_DIRECTION.
+    if (it != zones_.end()) {
+      if (array == nullptr) set.zones = it->second.zones;
+      if (lines_array == nullptr) set.lines = it->second.lines;
+    }
     set.version = (it == zones_.end() ? 0 : it->second.version) + 1;
     zones_[camera_code] = set;
   }
