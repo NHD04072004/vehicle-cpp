@@ -2151,3 +2151,80 @@ trước — viết ra rồi thay bằng cách khác nhưng không xoá.
 
 Test: **113/113 pass**. Mỗi commit đều build debug + chạy `tests/data/test.mp4` trước khi
 sang commit kế tiếp.
+
+---
+
+## Verify production — deploy 9 commit lên container thật
+
+`docker compose down && docker compose up --build -d`, 4 camera RTSP, GPU1 RTX 3090.
+
+### Sự cố phát hiện lúc deploy: MQTT rò rỉ socket
+
+Trước khi deploy, container cũ đang **chết im lặng**: kết nối MQTT mất lúc 23:50 và không
+phục hồi suốt 11 giờ. Chẩn đoán:
+
+- **14.984 socket bị rò rỉ** trong tiến trình (`ls /proc/1/fd | grep -c socket`).
+  `nvds_msgapi_connect` mở socket mỗi lần thất bại nhưng không đóng; sau 6600 lần thử
+  (~11 giờ) thì cạn fd nên adapter báo `Invalid input`.
+- Broker **hoàn toàn khoẻ** — test CONNACK thủ công với chính client-id `vehicle-PLATE-1`
+  trả `rc=0`. TCP từ trong container cũng thông.
+- `kMaxReconnectAttempts = 20000` × 5s ≈ **28 giờ** mới tự restart → dịch vụ chết lặng
+  gần một ngày trước khi có cơ hội tự phục hồi.
+
+Đây là bug **độc lập** với loạt sửa vòng đời nghiệp vụ. Deploy giải quyết tình trạng kẹt
+hiện tại (fd về 110), nhưng nguyên nhân gốc vẫn còn — xem mục việc còn lại.
+
+### Kết quả sau deploy (~3 phút traffic thật)
+
+| Chỉ số | Giá trị |
+|---|---|
+| Event phương tiện | 44 |
+| Event vi phạm | 6 (4 WRONG_LANE, 2 WRONG_WAY) |
+| Log `"— bỏ track"` | **0** |
+| Bắn trùng `(plate, code)` | **0** |
+| ERROR | 0 |
+| fd tiến trình | 110 |
+
+### B1 — bằng chứng trực tiếp trên production
+
+```
+11:01:33  track 196: WRONG_WAY cắt line 'REVERSE_DIRECTION' cùng chiều cấm, lệch 23.8 độ
+11:01:38  track 196: WRONG_WAY quá 5.0s không đủ ảnh — bỏ RIÊNG vế ngược chiều
+11:01:38  violation: camera=nga3traco plate=14AK05561 code=WRONG_WAY
+```
+
+Đúng kịch bản gây mất dữ liệu trước đây: cắt vạch, quá hạn 5s, không đủ ảnh. Code cũ gọi
+`markPushed()+markPosted()` → `shouldForceDelete` xoá track → mất trắng. Nay chỉ bỏ vế
+WRONG_WAY, và **event vẫn bắn được ngay giây đó**.
+
+### Tách nghiệp vụ — hai vi phạm trên cùng một xe
+
+```
+10:58:54  violation: plate=29E48054 code=WRONG_LANE
+10:58:56  violation: plate=29E48054 code=WRONG_WAY
+11:00:09  violation: plate=14K06240 code=WRONG_LANE
+11:00:11  violation: plate=14K06240 code=WRONG_WAY
+```
+
+Mỗi xe bắn được **cả hai** nghiệp vụ. Với `DedupCache` cũ (khoá OR theo track_id hoặc
+plate), cái thứ hai bị nuốt hoàn toàn.
+
+### B2 — góc lệch sau khi bỏ scale
+
+| | Góc lệch ghi nhận |
+|---|---|
+| Trước (doc sơ bộ) | 5.3° – 11.5° |
+| Sau khi bỏ scale | 19.3° – 23.8° |
+
+Chênh ~13° đúng bằng mức méo mà scale bất đẳng hướng (1920 vs 1080) gây ra — xác nhận sửa
+có hiệu lực thật. Vẫn dưới ngưỡng `max_angle_deg = 40` nên không bỏ sót xe vi phạm.
+
+### Việc còn lại phát hiện trong quá trình verify
+
+1. **MQTT rò rỉ socket** khi `nvds_msgapi_connect` thất bại — cần đóng session trước mỗi
+   lần thử lại. Ưu tiên cao: gây chết dịch vụ im lặng.
+2. **`kMaxReconnectAttempts = 20000`** (~28 giờ) quá cao để làm lưới an toàn; nên hạ xuống
+   cỡ 360 (~30 phút).
+3. Sample `tests/data/test.mp4` chỉ verify được tầng pipeline, **không chạm tầng nghiệp vụ**:
+   camera `local_0` không có trong VMS nên không nhận polygon, `handleMeta` bỏ frame ngay.
+   Muốn verify nghiệp vụ offline cần cơ chế nạp zone từ file.
