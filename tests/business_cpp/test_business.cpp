@@ -12,6 +12,7 @@
 #include "business/plate/plate_recognizer.h"
 #include "business/plate/rules.h"
 #include "business/plate/track.h"
+#include "utils/geometry.h"
 
 namespace {
 
@@ -392,6 +393,39 @@ void testMotion() {
 }
 
 // ---------------------------------------------------------------------------
+// geometry — angleBetweenDeg tự chuẩn hoá, nên scale direction chỉ gây méo góc
+// ---------------------------------------------------------------------------
+void testAngle() {
+  std::printf("== angleBetweenDeg ==\n");
+  using vehicle::Point;
+  using vehicle::utils::angleBetweenDeg;
+
+  // Dung sai 1e-3 độ: acos quanh |cos|≈1 có sai số dấu phẩy động cỡ 1e-6 độ.
+  // Thừa chính xác so với ngưỡng nghiệp vụ max_angle_deg = 40 độ.
+  constexpr double kEps = 1e-3;
+  check(std::fabs(angleBetweenDeg(Point{1.0, 0.0}, Point{1.0, 0.0})) < kEps,
+        "cùng hướng → 0 độ");
+  check(std::fabs(angleBetweenDeg(Point{1.0, 0.0}, Point{0.0, 1.0}) - 90.0) < kEps,
+        "vuông góc → 90 độ");
+  check(std::fabs(angleBetweenDeg(Point{1.0, 0.0}, Point{-1.0, 0.0}) - 180.0) < kEps,
+        "ngược hướng → 180 độ");
+
+  // Độ dài không ảnh hưởng: hàm tự chuẩn hoá.
+  check(std::fabs(angleBetweenDeg(Point{1.0, 1.0}, Point{5.0, 5.0})) < kEps,
+        "cùng hướng khác độ dài → vẫn 0 độ (hàm tự chuẩn hoá)");
+
+  // Đây là bug: scale BẤT ĐẲNG HƯỚNG làm méo góc thật sự.
+  const Point motion{1.0, 1.0};                 // xe đi chéo 45 độ
+  const Point dir_raw{1.0, 1.0};                // chiều cấm cũng 45 độ
+  const Point dir_scaled{1.0 * 1920.0, 1.0 * 1080.0};  // sau khi nhân frame_w/h
+  check(std::fabs(angleBetweenDeg(motion, dir_raw)) < kEps,
+        "direction gốc: lệch 0 độ (đúng)");
+  const double skew = angleBetweenDeg(motion, dir_scaled);
+  check(skew > 15.0,
+        "direction bị scale 1920x1080: lệch >15 độ dù thực tế cùng hướng (bug)");
+}
+
+// ---------------------------------------------------------------------------
 // PlateRecognizer::collectReady
 // ---------------------------------------------------------------------------
 void testCollectReady() {
@@ -553,6 +587,7 @@ int main() {
   testTrackPlateState();
   testKindLifecycle();
   testMotion();
+  testAngle();
   testCollectReady();
   testPerKindEmit();
   testClearStaleWrongWay();

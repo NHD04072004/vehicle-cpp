@@ -487,8 +487,11 @@ std::vector<business::plate::WrongWayLine> PlateProbe::wrongWayLinesFor(
       out.a = {line.points[0].x * sx, line.points[0].y * sy};
       out.b = {line.points[1].x * sx, line.points[1].y * sy};
     }
-    // direction cùng hệ toạ độ với points → scale y như điểm (chỉ cần đúng dấu).
-    out.direction = {line.direction.x * frame_w, line.direction.y * frame_h};
+    // Giữ nguyên vector gốc: angleBetweenDeg tự chuẩn hoá độ dài nên chỉ cần
+    // đúng HƯỚNG. Scale bất đẳng hướng (1920 vs 1080) sẽ làm méo góc — vector
+    // 45 độ (1,1) sau khi nhân thành (1920,1080) chỉ còn 29.4 độ, lệch 15.6 độ
+    // — đủ để phép so với max_angle_deg sai ở cả hai chiều.
+    out.direction = line.direction;
     lines.push_back(std::move(out));
   }
   return lines;
